@@ -1,0 +1,56 @@
+# Example Hermes profile config for hermes-kanban-warden MVP.
+# Merge the relevant sections into the target profile config.yaml.
+plugins:
+  enabled:
+    - kanban-warden
+
+kanban_warden:
+  # Master switch. Keep false until you have run `kanban-warden dry-run`.
+  enabled: true
+
+  # Discover every board visible to the profile. Use ["default", "team-a"] to pin.
+  boards: "*"
+
+  # Prevent duplicate supervisors from applying the same decisions.
+  leader_lock:
+    enabled: true
+    lease_seconds: 60
+    heartbeat_seconds: 20
+    # Optional override; default is $HERMES_HOME/kanban-warden/leader-lock.db.
+    db_path: null
+
+  # Supervisor polling cadence. Keep event polling short; health sweeps can be slower.
+  loop:
+    event_interval_seconds: 5
+    health_sweep_seconds: 60
+
+  # Durable state/outbox location. Null uses $HERMES_HOME/kanban-warden/state.db.
+  state_db_path: null
+  hermes_home: null
+  log_level: INFO
+
+  notifications:
+    # MVP queues notification decisions to the warden state DB outbox. A future
+    # transport drainer can deliver these to Telegram/WeChat/Feishu/etc.
+    enabled: true
+    channels:
+      - origin
+    review_required: true
+    stale_tasks: true
+    crash_alerts: true
+
+  auto_advance:
+    # enabled=false means observe and report only. Turn on after reviewing dry-run.
+    enabled: false
+    # dry_run=true plans actions but does not mutate Kanban boards.
+    dry_run: true
+    # Create reviewer cards for implementation cards blocked with review-required.
+    review_required: true
+    # Retry/escalate stale running tasks and worker failures within limits.
+    stale_claims: true
+    reviewer_assignee: reviewer
+
+  limits:
+    max_retries: 2
+    task_timeout_seconds: 14400
+    stale_claim_seconds: 3600
