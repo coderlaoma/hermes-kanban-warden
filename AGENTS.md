@@ -16,11 +16,11 @@ The project is still intentionally conservative. It warns and logs with redacted
 Use these names consistently:
 
 - Project/display name: `hermes-kanban-warden`
-- GitHub repository slug: `coderlaoma/kanban-warden`
+- GitHub repository slug: `coderlaoma/hermes-kanban-warden` (`https://github.com/coderlaoma/hermes-kanban-warden`)
 - Python import/config namespace: `kanban_warden`
 - Python distribution / Hermes plugin entry point / CLI slug: `kanban-warden`
 
-`kanban-warden` remains the current repo/package/CLI/plugin technical slug for this documentation-only update. Do not rename `pyproject.toml` package metadata, `src/kanban_warden/plugin.yaml`, CLI commands, runtime log prefixes, database paths, or Python imports unless a future task explicitly scopes a breaking slug migration with aliases and compatibility notes.
+`kanban-warden` remains the current package/CLI/plugin technical slug for this documentation-only update. Do not rename `pyproject.toml` package metadata, `src/kanban_warden/plugin.yaml`, CLI commands, runtime log prefixes, database paths, or Python imports unless a future task explicitly scopes a breaking slug migration with aliases and compatibility notes. Historical repository slugs such as `coderlaoma/kanban-warden` may redirect here, but new documentation should point to `coderlaoma/hermes-kanban-warden`.
 
 ## Current implementation scope
 

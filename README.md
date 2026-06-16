@@ -12,11 +12,11 @@ The first implementation is intentionally conservative: it warns and logs with r
 This project uses `hermes-kanban-warden` as the human-facing project/display name. The existing technical slugs remain unchanged in this documentation-only update:
 
 - Project/display name: `hermes-kanban-warden`
-- GitHub repository slug: `coderlaoma/kanban-warden`
+- GitHub repository slug: `coderlaoma/hermes-kanban-warden` (`https://github.com/coderlaoma/hermes-kanban-warden`)
 - Python import/config namespace: `kanban_warden`
 - Python distribution / Hermes plugin entry point / CLI slug: `kanban-warden`
 
-Keep these names distinct when documenting or changing the project. Do not rename the repository, package distribution, plugin entry point, CLI command, runtime log prefix, database path, or Python namespace unless a future migration task explicitly scopes that breaking change.
+Keep these names distinct when documenting or changing the project. Do not rename the package distribution, plugin entry point, CLI command, runtime log prefix, database path, or Python namespace unless a future migration task explicitly scopes that breaking change. Historical repository slugs such as `coderlaoma/kanban-warden` may redirect here, but new documentation should point to `coderlaoma/hermes-kanban-warden`.
 
 ## What it checks
 
