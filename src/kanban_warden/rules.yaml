@@ -1,0 +1,38 @@
+rules:
+  - id: api-key-assignment
+    severity: high
+    description: "Likely API key or token assignment"
+    pattern: '(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|client[_-]?secret|password|passwd|pwd)\b\s*[:=]\s*["'']?[^\s"'']{8,}'
+  - id: github-token
+    severity: critical
+    description: "GitHub personal access token"
+    pattern: '\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b'
+  - id: slack-token
+    severity: critical
+    description: "Slack token"
+    pattern: '\bxox[baprs]-[A-Za-z0-9-]{10,}\b'
+  - id: openai-key
+    severity: critical
+    description: "OpenAI style API key"
+    pattern: '\bsk-[A-Za-z0-9]{20,}\b'
+  - id: jwt
+    severity: medium
+    description: "JWT-like bearer token"
+    pattern: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+  - id: private-key
+    severity: critical
+    description: "PEM private key block"
+    pattern: '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  - id: database-url
+    severity: high
+    description: "Database URL with inline credentials"
+    pattern: '(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s/@:]+:[^\s/@]+@[^\s]+'
+  - id: generic-url-credentials
+    severity: high
+    description: "URL containing username and password"
+    pattern: '(?i)\b[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+'
+allowlist:
+  - '[REDACTED]'
+  - '<redacted>'
+  - 'example.com'
+  - 'localhost'
