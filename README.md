@@ -271,4 +271,3 @@ Secret scanner warning appears:
 3. Add state DB migrations and version reporting.
 4. Add integration tests against a live Hermes Kanban board fixture.
 5. Add operator dashboards or concise status summaries for pending outbox items and retry exhaustion.
-EOF'
