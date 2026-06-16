@@ -59,6 +59,10 @@ kanban_warden:
     heartbeat_seconds: 20
     # Optional; defaults under $HERMES_HOME/kanban-warden/leader-lock.db
     db_path: null
+  # Optional; defaults to $HERMES_HOME or ~/.hermes
+  hermes_home: null
+  # Optional; defaults under $HERMES_HOME/kanban-warden/state.db
+  state_db_path: null
   loop:
     event_interval_seconds: 5
     health_sweep_seconds: 60
@@ -79,7 +83,7 @@ kanban_warden:
     stale_claim_seconds: 3600
 ```
 
-When `kanban_warden.enabled` is true, the plugin starts `WardenSupervisor` as a daemon thread during plugin registration. The supervisor emits safe structured logs, obtains a SQLite leader lock before each tick, and performs a placeholder health sweep. This is a plugin lifecycle loop, not a `hermes cron` job.
+When `kanban_warden.enabled` is true, the plugin starts `WardenSupervisor` as a daemon thread during plugin registration. The supervisor emits safe structured logs, obtains a SQLite leader lock before each tick, discovers boards, tails new `task_events`, persists per-board cursors and idempotency state, and performs a read-only health sweep. This is a plugin lifecycle loop, not a `hermes cron` job.
 
 ## Debug CLI
 
@@ -92,7 +96,7 @@ kanban-warden --config config.yaml run-once
 kanban-warden demo-lock
 ```
 
-`demo-lock` demonstrates that two independent owners using the same SQLite lock cannot both obtain the active lease:
+`dry-run` prints a JSON report with discovered boards, cursor_before/cursor_after, recent new events, inferred task relationships, health findings, and the persisted state snapshot without mutating Kanban boards. `demo-lock` demonstrates that two independent owners using the same SQLite lock cannot both obtain the active lease:
 
 ```json
 {
@@ -125,8 +129,8 @@ python -m build
 
 ## Current scope and adaptation notes
 
-- The supervisor loop and config schema are implemented as an independent plugin layer with safe placeholders for notification, auto-advance, retry, and timeout policy.
-- Direct Kanban board mutation is not implemented in this skeleton; `auto_advance.enabled` remains opt-in and dry-run-first.
+- The supervisor loop and config schema are implemented as an independent plugin layer with board discovery, event tailing, persistent cursors/idempotency state, relationship inference, and a read-only health sweep.
+- Direct Kanban board mutation is not implemented; `auto_advance.enabled` remains opt-in and dry-run-first for future remediation layers.
 - Hermes plugin lifecycle APIs can differ by installed Hermes version. This package uses the documented `register(ctx)` hook style and defensively reads `ctx.config`, `ctx.profile_config`, `ctx.settings`, or `ctx.get_config()`.
 - Unload support is exposed via `unregister(ctx)` for plugin managers that call it.
 

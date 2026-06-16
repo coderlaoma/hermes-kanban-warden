@@ -11,8 +11,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .board import BoardEventTailer, analyze_health, default_hermes_home, discover_boards
 from .config import KanbanWardenConfig
 from .lock import LeaderLock
+from .state import WardenStateStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +34,8 @@ class WardenSupervisor:
         self.lock = lock or LeaderLock(
             _default_lock_path(config), owner=f"{self.profile_name}:{os.getpid()}"
         )
+        self.state_store = WardenStateStore(_default_state_path(config))
+        self.event_tailer = BoardEventTailer(self.state_store)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_heartbeat = 0.0
@@ -70,17 +74,76 @@ class WardenSupervisor:
         if self.config.leader_lock.enabled and not self._ensure_leader(now):
             LOGGER.debug("kanban-warden skipped tick; another leader is active")
             return False
+        report = self.collect(now=now)
         if now - self._last_health_sweep >= self.config.loop.health_sweep_seconds:
-            self._health_sweep(now)
+            self._health_sweep(now, report)
             self._last_health_sweep = now
         LOGGER.info(
-            "kanban-warden tick profile=%s boards=%s dry_run=%s notifications=%s",
+            "kanban-warden tick profile=%s boards=%s new_events=%s health_findings=%s dry_run=%s notifications=%s",
             self.profile_name,
-            self.config.boards,
+            len(report["boards"]),
+            sum(int(board["new_events"]) for board in report["boards"]),
+            len(report["health"]),
             self.config.auto_advance.dry_run,
             self.config.notifications.enabled,
         )
         return True
+
+    def collect(self, *, now: float | None = None) -> dict[str, Any]:
+        """Discover boards, tail new events, persist state, and return a dry-run-safe report."""
+
+        current_time = time.time() if now is None else now
+        boards = discover_boards(
+            self.config.boards,
+            hermes_home=self.config.hermes_home or default_hermes_home(),
+        )
+        board_reports: list[dict[str, Any]] = []
+        recent_events: list[dict[str, Any]] = []
+        relationships: dict[str, dict[str, Any]] = {}
+        health: list[dict[str, Any]] = []
+        for board in boards:
+            cursor_before = self.state_store.get_cursor(board.name)
+            events = self.event_tailer.tail(board.name, board.db_path)
+            cursor_after = self.state_store.get_cursor(board.name)
+            board_reports.append(
+                {
+                    "name": board.name,
+                    "kind": board.kind,
+                    "db_path": str(board.db_path),
+                    "cursor_before": cursor_before,
+                    "cursor_after": cursor_after,
+                    "new_events": len(events),
+                }
+            )
+            for event in events[-10:]:
+                recent_events.append(event.summary())
+                if event.task_id:
+                    relationships[f"{board.name}:{event.task_id}"] = event.relationship.to_dict()
+            health.extend(
+                analyze_health(
+                    board.name,
+                    board.db_path,
+                    now=current_time,
+                    stale_claim_seconds=self.config.limits.stale_claim_seconds,
+                    task_timeout_seconds=self.config.limits.task_timeout_seconds,
+                )
+            )
+        report = {
+            "profile": self.profile_name,
+            "dry_run": self.config.auto_advance.dry_run,
+            "boards": board_reports,
+            "recent_events": recent_events,
+            "relationships": list(relationships.values()),
+            "health": health,
+            "state": self.state_store.snapshot(),
+        }
+        self.state_store.set_runtime_metadata(
+            "last_collect", {"at": current_time, "boards": [b["name"] for b in board_reports]}
+        )
+        return report
+
+    def dry_run(self, *, now: float | None = None) -> dict[str, Any]:
+        return self.collect(now=now)
 
     def status(self) -> dict[str, Any]:
         lock_status = self.lock.status()
@@ -99,6 +162,7 @@ class WardenSupervisor:
                 "event_interval_seconds": self.config.loop.event_interval_seconds,
                 "health_sweep_seconds": self.config.loop.health_sweep_seconds,
             },
+            "state": self.state_store.snapshot(),
             "policies": {
                 "notifications": self.config.notifications.__dict__,
                 "auto_advance": self.config.auto_advance.__dict__,
@@ -118,16 +182,22 @@ class WardenSupervisor:
             LOGGER.info("kanban-warden acquired leader lock owner=%s", self.lock.owner)
         return acquired
 
-    def _health_sweep(self, now: float) -> None:
+    def _health_sweep(self, now: float, report: dict[str, Any] | None = None) -> None:
+        report = report or self.collect(now=now)
         LOGGER.info(
-            "kanban-warden health sweep profile=%s now=%.0f "
-            "max_retries=%s task_timeout_seconds=%s stale_claim_seconds=%s",
+            "kanban-warden health sweep profile=%s now=%.0f boards=%s findings=%s",
             self.profile_name,
             now,
-            self.config.limits.max_retries,
-            self.config.limits.task_timeout_seconds,
-            self.config.limits.stale_claim_seconds,
+            len(report.get("boards", [])),
+            len(report.get("health", [])),
         )
+
+
+def _default_state_path(config: KanbanWardenConfig) -> str:
+    if config.state_db_path:
+        return config.state_db_path
+    home = os.environ.get("HERMES_HOME") or os.path.join(Path.home(), ".hermes")
+    return os.path.join(home, "kanban-warden", "state.db")
 
 
 def _default_lock_path(config: KanbanWardenConfig) -> str:

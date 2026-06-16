@@ -56,6 +56,8 @@ class KanbanWardenConfig:
     auto_advance: AutoAdvanceConfig = field(default_factory=AutoAdvanceConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     log_level: str = "INFO"
+    hermes_home: str | None = None
+    state_db_path: str | None = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None) -> KanbanWardenConfig:
@@ -75,6 +77,8 @@ class KanbanWardenConfig:
             auto_advance=AutoAdvanceConfig(**_pick(section.get("auto_advance"), AutoAdvanceConfig)),
             limits=LimitsConfig(**_pick(section.get("limits"), LimitsConfig)),
             log_level=str(section.get("log_level", "INFO")),
+            hermes_home=str(section["hermes_home"]) if section.get("hermes_home") else None,
+            state_db_path=str(section["state_db_path"]) if section.get("state_db_path") else None,
         )
 
     def board_names(self) -> list[str] | None:

@@ -50,8 +50,18 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             supervisor = WardenSupervisor(config, profile_name=args.profile)
-        ran = supervisor.tick()
-        print(json.dumps({"ran": ran, "status": supervisor.status()}, indent=2, sort_keys=True))
+        if args.command == "dry-run":
+            report = supervisor.dry_run()
+            print(
+                json.dumps(
+                    {"ran": True, "dry_run": report, "status": supervisor.status()},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            ran = supervisor.tick()
+            print(json.dumps({"ran": ran, "status": supervisor.status()}, indent=2, sort_keys=True))
         return 0
     parser.error(f"unknown command {args.command}")
     return 2
@@ -75,6 +85,8 @@ def _to_dict(config: KanbanWardenConfig) -> dict[str, Any]:
         "auto_advance": config.auto_advance.__dict__,
         "limits": config.limits.__dict__,
         "log_level": config.log_level,
+        "hermes_home": config.hermes_home,
+        "state_db_path": config.state_db_path,
     }
 
 

@@ -38,10 +38,10 @@ Implemented in the current skeleton:
 
 Not yet implemented as real operational behavior:
 
-- Real Kanban board event tailing, checkpointing, or state-machine processing.
+- Kanban board event tailing and checkpointing are now implemented as read-only collection; state-machine remediation remains future work.
 - Real notification delivery to chat, email, Feishu, or other channels.
 - Real Kanban auto-advance, task unblocking, retry resets, stale-claim repair, or other remediation writes.
-- Real board health analysis beyond the current placeholder health-sweep log line.
+- Mutating board health remediation; current health sweep only reports candidate states.
 - Integration tests against a temporary Hermes Kanban database or live Hermes gateway.
 
 Treat `notifications.*`, `auto_advance.*`, retry limits, stale-claim limits, and timeout settings as configuration surface for future policy until implementation lands. Do not document them as active production behavior unless the corresponding code and tests exist.
@@ -94,7 +94,9 @@ Current confirmed layout:
 - `src/kanban_warden/warden.py` — secret scanner, YAML rule loading, redaction, and warning rendering.
 - `src/kanban_warden/config.py` — typed configuration model for supervisor, leader lock, loop, notification, auto-advance, and limits settings.
 - `src/kanban_warden/lock.py` — SQLite leader-lock implementation with lease and heartbeat semantics.
-- `src/kanban_warden/supervisor.py` — lifecycle-bound supervisor loop, leader-lock coordination, status reporting, placeholder health sweep, and demo lock contention helper.
+- `src/kanban_warden/supervisor.py` — lifecycle-bound supervisor loop, leader-lock coordination, event collection, dry-run/status reporting, read-only health sweep, and demo lock contention helper.
+- `src/kanban_warden/board.py` — read-only board discovery, task_events tailing, relationship inference, and candidate health findings.
+- `src/kanban_warden/state.py` — SQLite persistent state for per-board cursors, idempotency keys, retry budgets, and runtime metadata.
 - `src/kanban_warden/cli.py` — debug CLI for status, dry-run/run-once ticks, and leader-lock demonstration.
 - `src/kanban_warden/rules.yaml` — packaged detection rules and allowlist values.
 - `src/kanban_warden/plugin.yaml` — directory-plugin metadata for Hermes.
