@@ -41,6 +41,74 @@ def _init_board(db_path: Path) -> None:
     con.close()
 
 
+
+def _init_real_schema_board(db_path: Path) -> None:
+    """Create the subset of the current Hermes Kanban schema that actions mutate."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db_path)
+    con.executescript(
+        """
+        create table tasks (
+          id text primary key,
+          title text not null,
+          body text,
+          assignee text,
+          status text not null,
+          priority integer default 0,
+          created_by text,
+          created_at integer not null,
+          started_at integer,
+          completed_at integer,
+          workspace_kind text not null default 'scratch',
+          workspace_path text,
+          claim_lock text,
+          claim_expires integer,
+          tenant text,
+          result text,
+          idempotency_key text,
+          consecutive_failures integer not null default 0,
+          worker_pid integer,
+          last_failure_error text,
+          max_runtime_seconds integer,
+          last_heartbeat_at integer,
+          current_run_id integer,
+          workflow_template_id text,
+          current_step_key text,
+          skills text,
+          max_retries integer,
+          branch_name text,
+          model_override text,
+          session_id text,
+          goal_mode integer not null default 0,
+          goal_max_turns integer
+        );
+        create index idx_tasks_idempotency on tasks(idempotency_key);
+        create table task_events (
+          id integer primary key autoincrement,
+          task_id text not null,
+          run_id integer,
+          kind text not null,
+          payload text,
+          created_at integer not null
+        );
+        create table task_links (
+          parent_id text not null,
+          child_id text not null,
+          primary key(parent_id, child_id)
+        );
+        create table task_comments (
+          id integer primary key autoincrement,
+          task_id text not null,
+          author text not null,
+          body text not null,
+          created_at integer not null
+        );
+        """
+    )
+    con.commit()
+    con.close()
+
+
 def _event(db_path: Path, task_id: str, kind: str, payload: dict[str, object] | None = None, created_at: int = 100) -> None:
     con = sqlite3.connect(db_path)
     con.execute(
@@ -150,3 +218,55 @@ def test_stale_running_retry_budget_escalates_after_retries(tmp_path: Path) -> N
     assert any(action["kind"] == "retry" for action in first["planned_actions"])
     assert any(action["kind"] == "escalate" for action in second["planned_actions"])
     assert WardenStateStore(config.state_db_path or "").peek_retry("default", "stale", "stale-running") == 1
+
+
+def test_real_schema_create_reviewer_populates_required_task_columns(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.execute(
+        "insert into tasks(id, title, status, assignee, created_at, workspace_kind) values ('impl', 'Impl', 'blocked', 'hairou', 1, 'scratch')"
+    )
+    con.commit()
+    con.close()
+    _event(board, "impl", "blocked", {"reason": "review-required: check diff"}, 2)
+
+    WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    con = sqlite3.connect(board)
+    row = con.execute(
+        "select assignee, status, workspace_kind, created_by, idempotency_key from tasks where id = 'review_impl'"
+    ).fetchone()
+    assert row == ("reviewer", "ready", "scratch", "kanban-warden", "reviewer:default:impl")
+
+
+def test_real_schema_comment_paths_populate_required_author_column(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False, max_retries=0)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.execute(
+        "insert into tasks(id, title, status, assignee, created_at, workspace_kind) values ('impl', 'Impl', 'blocked', 'hairou', 1, 'scratch')"
+    )
+    con.execute(
+        "insert into tasks(id, title, status, assignee, created_at, workspace_kind) values ('review_impl', 'Review', 'done', 'reviewer', 2, 'scratch')"
+    )
+    con.execute("insert into task_links(parent_id, child_id) values ('impl', 'review_impl')")
+    con.execute(
+        "insert into tasks(id, title, status, assignee, created_at, started_at, workspace_kind) values ('stale', 'Stale', 'running', 'hairou', 1, 1, 'scratch')"
+    )
+    con.commit()
+    con.close()
+    _event(board, "review_impl", "completed", {"verdict": "needs-changes", "source_task": "impl"}, 3)
+
+    supervisor = WardenSupervisor(config, profile_name="tester")
+    supervisor.collect(now=20)
+    supervisor.collect(now=21)
+
+    con = sqlite3.connect(board)
+    comments = con.execute("select task_id, author, body from task_comments order by id").fetchall()
+    assert {row[0] for row in comments} == {"impl", "stale"}
+    assert {row[1] for row in comments} == {"kanban-warden"}
+    assert any("warden-review-needs-changes" in row[2] for row in comments)
+    assert any("retry budget exhausted" in row[2] for row in comments)

@@ -295,11 +295,15 @@ class KanbanActionEngine:
         if not source_task:
             return "missing-source-task"
         review_id = f"review_{source_task}"
-        now = time.time()
+        now = int(time.time())
         with sqlite3.connect(db_path) as con:
-            con.execute(
-                "insert or ignore into tasks(id, title, status, assignee, created_at) values (?, ?, ?, ?, ?)",
-                (review_id, f"Review {source_task}", "ready", self.config.auto_advance.reviewer_assignee, now),
+            _insert_reviewer_task(
+                con,
+                review_id=review_id,
+                source_task=source_task,
+                reviewer_assignee=self.config.auto_advance.reviewer_assignee,
+                idempotency_key=action.idempotency_key,
+                now=now,
             )
             if _table_exists(con, "task_links"):
                 con.execute(
@@ -313,7 +317,7 @@ class KanbanActionEngine:
         task_id = action.target_task_id or action.task_id
         if not task_id:
             return "missing-task"
-        now = time.time()
+        now = int(time.time())
         with sqlite3.connect(db_path) as con:
             if not _table_exists(con, "task_comments"):
                 return "comments-table-missing"
@@ -324,7 +328,7 @@ class KanbanActionEngine:
             if existing:
                 return "comment-exists"
             body = f"{action.message}\n\nwarden-action: {action.idempotency_key}"
-            con.execute("insert into task_comments(task_id, body, created_at) values (?, ?, ?)", (task_id, body, now))
+            _insert_comment_row(con, task_id=task_id, body=body, now=now)
             _insert_event(con, task_id, "commented", {"by": "kanban-warden", "idempotency_key": action.idempotency_key}, now)
         return "commented"
 
@@ -343,6 +347,66 @@ class KanbanActionEngine:
             _insert_event(con, task_id, "unblocked", {"by": "kanban-warden", "reason": action.reason, "idempotency_key": action.idempotency_key}, now)
         return "unblocked"
 
+
+
+def _insert_reviewer_task(
+    con: sqlite3.Connection,
+    *,
+    review_id: str,
+    source_task: str,
+    reviewer_assignee: str,
+    idempotency_key: str,
+    now: int,
+) -> None:
+    """Insert a reviewer card using only columns present in the live schema.
+
+    Hermes Kanban schemas evolve. The real schema has NOT NULL columns such as
+    ``workspace_kind`` that are absent from older test fixtures, so direct INSERT
+    statements must be built from PRAGMA table_info instead of assuming one fixed
+    fixture shape.
+    """
+    values: dict[str, Any] = {
+        "id": review_id,
+        "title": f"Review {source_task}",
+        "body": f"Review implementation card {source_task}.",
+        "status": "ready",
+        "assignee": reviewer_assignee,
+        "priority": 0,
+        "created_by": "kanban-warden",
+        "created_at": now,
+        "workspace_kind": "scratch",
+        "idempotency_key": idempotency_key,
+        "consecutive_failures": 0,
+        "goal_mode": 0,
+    }
+    _insert_row(con, "tasks", values, conflict="or ignore")
+
+
+def _insert_comment_row(con: sqlite3.Connection, *, task_id: str, body: str, now: int) -> None:
+    values: dict[str, Any] = {
+        "task_id": task_id,
+        "author": "kanban-warden",
+        "body": body,
+        "created_at": now,
+    }
+    _insert_row(con, "task_comments", values)
+
+
+def _insert_row(
+    con: sqlite3.Connection, table: str, values: dict[str, Any], *, conflict: str = ""
+) -> None:
+    columns = [name for name in values if name in _table_columns(con, table)]
+    if not columns:
+        return
+    placeholders = ", ".join("?" for _ in columns)
+    column_sql = ", ".join(columns)
+    conflict_sql = f" {conflict}" if conflict else ""
+    sql = f"insert{conflict_sql} into {table}({column_sql}) values ({placeholders})"
+    con.execute(sql, tuple(values[name] for name in columns))
+
+
+def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in con.execute(f"pragma table_info({table})")}
 
 def _is_review_required(event: BoardEvent) -> bool:
     payload = event.payload or {}
