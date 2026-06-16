@@ -37,6 +37,7 @@ class AutoAdvanceConfig:
     dry_run: bool = True
     review_required: bool = False
     stale_claims: bool = False
+    reviewer_assignee: str = "reviewer"
 
 
 @dataclass(frozen=True)

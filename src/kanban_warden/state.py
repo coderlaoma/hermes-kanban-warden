@@ -64,6 +64,52 @@ class WardenStateStore:
             ).fetchone()
         return int(row[0])
 
+    def peek_retry(self, board_name: str, task_id: str, action: str) -> int:
+        with self._connect() as con:
+            row = con.execute(
+                "select attempts from retry_budgets where board_name = ? and task_id = ? and action = ?",
+                (board_name, task_id, action),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def mark_action_started(self, key: str) -> bool:
+        now = time.time()
+        try:
+            with self._connect() as con:
+                con.execute(
+                    "insert into action_log(key, status, attempts, created_at, updated_at) values (?, 'started', 1, ?, ?)",
+                    (key, now, now),
+                )
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def mark_action_done(self, key: str, note: str = "") -> None:
+        with self._connect() as con:
+            con.execute(
+                "update action_log set status = 'done', note = ?, updated_at = ? where key = ?",
+                (note, time.time(), key),
+            )
+
+    def mark_action_failed(self, key: str, error: str) -> None:
+        with self._connect() as con:
+            con.execute(
+                "update action_log set status = 'failed', note = ?, updated_at = ? where key = ?",
+                (error[:1000], time.time(), key),
+            )
+
+    def enqueue_notification(self, key: str, payload: dict[str, Any]) -> bool:
+        now = time.time()
+        try:
+            with self._connect() as con:
+                con.execute(
+                    "insert into notification_outbox(key, payload_json, status, attempts, created_at, updated_at) values (?, ?, 'queued', 0, ?, ?)",
+                    (key, json.dumps(payload, sort_keys=True), now, now),
+                )
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
     def set_runtime_metadata(self, key: str, value: dict[str, Any]) -> None:
         with self._connect() as con:
             con.execute(
@@ -104,10 +150,19 @@ class WardenStateStore:
                 )
             ]
             processed_count = int(con.execute("select count(*) from processed_keys").fetchone()[0])
+            action_rows = [
+                {"key": str(row[0]), "status": str(row[1]), "attempts": int(row[2])}
+                for row in con.execute(
+                    "select key, status, attempts from action_log order by updated_at desc, key limit 50"
+                )
+            ]
+            outbox_count = int(con.execute("select count(*) from notification_outbox").fetchone()[0])
         return {
             "cursors": cursors,
             "processed_key_count": processed_count,
             "retry_budgets": retry_rows,
+            "action_log": action_rows,
+            "notification_outbox_count": outbox_count,
         }
 
     def _connect(self) -> sqlite3.Connection:
@@ -139,6 +194,23 @@ class WardenStateStore:
                 create table if not exists runtime_metadata (
                   key text primary key,
                   value_json text not null,
+                  updated_at real not null
+                );
+                create table if not exists action_log (
+                  key text primary key,
+                  status text not null,
+                  attempts integer not null default 0,
+                  note text not null default '',
+                  created_at real not null,
+                  updated_at real not null
+                );
+                create table if not exists notification_outbox (
+                  key text primary key,
+                  payload_json text not null,
+                  status text not null default 'queued',
+                  attempts integer not null default 0,
+                  last_error text,
+                  created_at real not null,
                   updated_at real not null
                 );
                 """

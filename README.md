@@ -69,6 +69,7 @@ kanban_warden:
   notifications:
     enabled: false
     channels: []
+    # MVP notification sink is a durable state-db outbox; delivery transports can drain it.
     review_required: true
     stale_tasks: true
     crash_alerts: true
@@ -77,6 +78,7 @@ kanban_warden:
     dry_run: true
     review_required: false
     stale_claims: false
+    reviewer_assignee: reviewer
   limits:
     max_retries: 2
     task_timeout_seconds: 14400
@@ -129,8 +131,9 @@ python -m build
 
 ## Current scope and adaptation notes
 
-- The supervisor loop and config schema are implemented as an independent plugin layer with board discovery, event tailing, persistent cursors/idempotency state, relationship inference, and a read-only health sweep.
-- Direct Kanban board mutation is not implemented; `auto_advance.enabled` remains opt-in and dry-run-first for future remediation layers.
+- The supervisor loop and config schema are implemented as an independent plugin layer with board discovery, event tailing, persistent cursors/idempotency state, relationship inference, a health sweep, and a dry-run-first notification/auto-advance state machine.
+- MVP orchestration covers key task notifications, review-required reviewer creation, reviewer approve/needs-changes source-card comments and unblock transitions, stale/crash retry budgets, and retry-exhaustion escalation. External notification delivery is represented by a durable outbox in the warden state DB so transport failures can be retried or summarized without losing the decision.
+- Direct Kanban board mutation remains opt-in behind `auto_advance.enabled`; `dry_run` reports planned actions without modifying boards.
 - Hermes plugin lifecycle APIs can differ by installed Hermes version. This package uses the documented `register(ctx)` hook style and defensively reads `ctx.config`, `ctx.profile_config`, `ctx.settings`, or `ctx.get_config()`.
 - Unload support is exposed via `unregister(ctx)` for plugin managers that call it.
 

@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .actions import KanbanActionEngine
 from .board import BoardEventTailer, analyze_health, default_hermes_home, discover_boards
 from .config import KanbanWardenConfig
 from .lock import LeaderLock
@@ -36,6 +37,7 @@ class WardenSupervisor:
         )
         self.state_store = WardenStateStore(_default_state_path(config))
         self.event_tailer = BoardEventTailer(self.state_store)
+        self.action_engine = KanbanActionEngine(config, self.state_store)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_heartbeat = 0.0
@@ -101,6 +103,8 @@ class WardenSupervisor:
         recent_events: list[dict[str, Any]] = []
         relationships: dict[str, dict[str, Any]] = {}
         health: list[dict[str, Any]] = []
+        planned_actions: list[dict[str, Any]] = []
+        action_results: list[dict[str, Any]] = []
         for board in boards:
             cursor_before = self.state_store.get_cursor(board.name)
             events = self.event_tailer.tail(board.name, board.db_path)
@@ -119,14 +123,23 @@ class WardenSupervisor:
                 recent_events.append(event.summary())
                 if event.task_id:
                     relationships[f"{board.name}:{event.task_id}"] = event.relationship.to_dict()
-            health.extend(
-                analyze_health(
-                    board.name,
-                    board.db_path,
-                    now=current_time,
-                    stale_claim_seconds=self.config.limits.stale_claim_seconds,
-                    task_timeout_seconds=self.config.limits.task_timeout_seconds,
-                )
+            event_actions = self.action_engine.plan_for_events(events)
+            planned_actions.extend(action.to_dict() for action in event_actions)
+            action_results.extend(
+                result.to_dict() for result in self.action_engine.apply(board.db_path, event_actions)
+            )
+            board_health = analyze_health(
+                board.name,
+                board.db_path,
+                now=current_time,
+                stale_claim_seconds=self.config.limits.stale_claim_seconds,
+                task_timeout_seconds=self.config.limits.task_timeout_seconds,
+            )
+            health.extend(board_health)
+            health_actions = self.action_engine.plan_for_health(board_health)
+            planned_actions.extend(action.to_dict() for action in health_actions)
+            action_results.extend(
+                result.to_dict() for result in self.action_engine.apply(board.db_path, health_actions)
             )
         report = {
             "profile": self.profile_name,
@@ -135,6 +148,8 @@ class WardenSupervisor:
             "recent_events": recent_events,
             "relationships": list(relationships.values()),
             "health": health,
+            "planned_actions": planned_actions,
+            "action_results": action_results,
             "state": self.state_store.snapshot(),
         }
         self.state_store.set_runtime_metadata(
