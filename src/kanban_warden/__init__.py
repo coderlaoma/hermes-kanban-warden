@@ -106,7 +106,11 @@ def _start_supervisor_if_enabled(ctx: Any) -> None:
     if not config.enabled:
         LOGGER.info("kanban-warden loaded; supervisor disabled")
         return
+    if _SUPERVISOR is not None:
+        LOGGER.info("kanban-warden supervisor already running")
+        return
     profile_name = _profile_name(ctx)
+    LOGGER.info("kanban-warden loaded; supervisor enabled profile=%s", profile_name or "default")
     _SUPERVISOR = WardenSupervisor(config, profile_name=profile_name)
     _SUPERVISOR.start()
 
@@ -121,6 +125,21 @@ def _context_config(ctx: Any) -> Mapping[str, Any]:
         value = get_config()
         if isinstance(value, Mapping):
             return value
+
+    # Hermes passes PluginContext to register(ctx). PluginContext intentionally
+    # exposes registration methods but not the loaded profile config, so profile
+    # settings such as kanban_warden.enabled must be read through Hermes'
+    # profile-aware config loader. Without this fallback, entry-point plugins
+    # always saw an empty mapping and logged "supervisor disabled" even when the
+    # active profile configured kanban_warden.enabled: true.
+    try:
+        from hermes_cli.config import load_config  # type: ignore[import-not-found]
+
+        value = load_config()
+        if isinstance(value, Mapping):
+            return value
+    except Exception:
+        LOGGER.debug("kanban-warden could not load Hermes profile config", exc_info=True)
     return {}
 
 

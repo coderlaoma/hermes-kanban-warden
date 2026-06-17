@@ -32,7 +32,7 @@ Implemented in the current skeleton:
 - YAML-backed scanner rules and allowlisted redaction placeholders.
 - Typed configuration dataclasses for supervisor, leader lock, loop cadence, notification policy, auto-advance policy, and safety limits.
 - A SQLite leader lock with lease, heartbeat, status, release, and contention-demo behavior.
-- `WardenSupervisor`, a daemon-thread plugin lifecycle loop that obtains the leader lock before each tick and performs safe structured logging plus a placeholder health sweep.
+- `WardenSupervisor`, a daemon-thread plugin lifecycle loop that obtains the leader lock before each tick, tails board events, preserves root/child relationship metadata, and performs safe structured logging plus health sweeps.
 - `kanban-warden` CLI commands: `status`, `dry-run`, `run-once`, and `demo-lock`.
 - Unit tests for scanner behavior, plugin result transformation, config parsing, leader-lock contention, supervisor dry ticks, and CLI demo behavior.
 
@@ -45,6 +45,10 @@ Not yet implemented as real operational behavior:
 - Integration tests against a temporary Hermes Kanban database or live Hermes gateway.
 
 Treat `notifications.*`, `auto_advance.*`, retry limits, stale-claim limits, and timeout settings as configuration surface for future policy until implementation lands. Do not document them as active production behavior unless the corresponding code and tests exist.
+
+## Root-only subscription policy
+
+Gateway/entry subscriptions should track root Kanban tasks only. Decomposed child events must propagate through the Kanban event stream and the `hermes-kanban-warden`/Kanban notification plugin path. Manually subscribing child cards is reserved for explicit operator requests, debugging, or temporary recovery. Tests and docs should guard against regressions where profile config enables the plugin but the supervisor remains disabled.
 
 ## Core design principles
 
@@ -107,9 +111,9 @@ Current confirmed layout:
 Currently absent or not documented as first-class project areas:
 
 - No `docs/` directory.
-- No `scripts/` directory.
+- `scripts/` contains disposable verification and operator check scripts; keep them secret-safe and runnable from the checkout.
 - No `Makefile` or `justfile`.
-- No real board event tailer, notification backend, Kanban state machine, or remediation action implementation yet.
+- No real notification transport backend or packaged state DB migration system yet.
 
 ## Development and test commands
 

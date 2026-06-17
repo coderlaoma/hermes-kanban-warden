@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
-from kanban_warden import _transform_tool_result
+import kanban_warden
+from kanban_warden import _context_config, _transform_tool_result
 from kanban_warden.cli import main
 from kanban_warden.config import KanbanWardenConfig
 from kanban_warden.lock import LeaderLock
@@ -93,6 +96,168 @@ def test_config_loads_required_profile_keys() -> None:
     assert config.loop.event_interval_seconds == 2
     assert config.notifications.channels == ["origin"]
     assert config.limits.max_retries == 3
+
+
+
+def test_plugin_context_config_falls_back_to_hermes_profile_config(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    hermes_config = {
+        "kanban_warden": {
+            "enabled": True,
+            "leader_lock": {"enabled": False},
+        }
+    }
+    hermes_cli_module = types.ModuleType("hermes_cli")
+    config_module = types.ModuleType("hermes_cli.config")
+    config_module.load_config = lambda: hermes_config
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
+
+    class PluginContextLike:
+        def register_hook(self, _name, _handler):  # type: ignore[no-untyped-def]
+            return None
+
+    assert _context_config(PluginContextLike()) is hermes_config
+
+
+def test_register_starts_supervisor_from_hermes_profile_config(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    hermes_config = {
+        "kanban_warden": {
+            "enabled": True,
+            "leader_lock": {"enabled": False},
+            "loop": {"once": True},
+        }
+    }
+    hermes_cli_module = types.ModuleType("hermes_cli")
+    config_module = types.ModuleType("hermes_cli.config")
+    config_module.load_config = lambda: hermes_config
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
+    monkeypatch.setattr(kanban_warden, "_SUPERVISOR", None)
+
+    started = {}
+
+    class FakeSupervisor:
+        def __init__(self, config, profile_name=None):  # type: ignore[no-untyped-def]
+            started["enabled"] = config.enabled
+            started["leader_lock"] = config.leader_lock.enabled
+            started["profile"] = profile_name
+
+        def start(self):  # type: ignore[no-untyped-def]
+            started["started"] = True
+            return True
+
+    monkeypatch.setattr(kanban_warden, "WardenSupervisor", FakeSupervisor)
+
+    class PluginContextLike:
+        def __init__(self) -> None:
+            self.hooks = []
+            self.profile_name = "hairou-feishu"
+
+        def register_hook(self, name, handler):  # type: ignore[no-untyped-def]
+            self.hooks.append((name, handler))
+
+    ctx = PluginContextLike()
+    kanban_warden.register(ctx)
+
+    assert [name for name, _ in ctx.hooks] == ["pre_tool_call", "transform_tool_result"]
+    assert started == {
+        "enabled": True,
+        "leader_lock": False,
+        "profile": "hairou-feishu",
+        "started": True,
+    }
+    monkeypatch.setattr(kanban_warden, "_SUPERVISOR", None)
+
+
+
+def test_config_boolean_string_false_values_are_false() -> None:
+    config = KanbanWardenConfig.from_mapping(
+        {
+            "kanban_warden": {
+                "enabled": "false",
+                "leader_lock": {"enabled": "off"},
+                "loop": {"once": "no"},
+                "auto_advance": {"enabled": "0", "dry_run": "false"},
+                "notifications": {"enabled": "no"},
+            }
+        }
+    )
+
+    assert config.enabled is False
+    assert config.leader_lock.enabled is False
+    assert config.loop.once is False
+    assert config.auto_advance.enabled is False
+    assert config.auto_advance.dry_run is False
+    assert config.notifications.enabled is False
+
+
+def test_context_mapping_takes_precedence_over_hermes_loader(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    ctx_config = {"kanban_warden": {"enabled": False}}
+    hermes_config = {"kanban_warden": {"enabled": True}}
+    hermes_cli_module = types.ModuleType("hermes_cli")
+    config_module = types.ModuleType("hermes_cli.config")
+    config_module.load_config = lambda: hermes_config
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
+
+    class ContextWithConfig:
+        config = ctx_config
+
+    assert _context_config(ContextWithConfig()) is ctx_config
+
+
+def test_register_does_not_start_supervisor_when_profile_config_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    hermes_cli_module = types.ModuleType("hermes_cli")
+    config_module = types.ModuleType("hermes_cli.config")
+    config_module.load_config = lambda: {"kanban_warden": {"enabled": False}}
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
+    monkeypatch.setattr(kanban_warden, "_SUPERVISOR", None)
+
+    class ExplodingSupervisor:
+        def __init__(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("disabled config must not instantiate supervisor")
+
+    monkeypatch.setattr(kanban_warden, "WardenSupervisor", ExplodingSupervisor)
+
+    class PluginContextLike:
+        def __init__(self) -> None:
+            self.hooks = []
+
+        def register_hook(self, name, handler):  # type: ignore[no-untyped-def]
+            self.hooks.append((name, handler))
+
+    ctx = PluginContextLike()
+    kanban_warden.register(ctx)
+
+    assert [name for name, _ in ctx.hooks] == ["pre_tool_call", "transform_tool_result"]
+    assert kanban_warden._SUPERVISOR is None
+
+
+def test_register_does_not_start_duplicate_supervisor(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    hermes_cli_module = types.ModuleType("hermes_cli")
+    config_module = types.ModuleType("hermes_cli.config")
+    config_module.load_config = lambda: {"kanban_warden": {"enabled": True}}
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_module)
+
+    existing = object()
+    monkeypatch.setattr(kanban_warden, "_SUPERVISOR", existing)
+
+    class ExplodingSupervisor:
+        def __init__(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("existing supervisor must be reused")
+
+    monkeypatch.setattr(kanban_warden, "WardenSupervisor", ExplodingSupervisor)
+
+    class PluginContextLike:
+        def register_hook(self, _name, _handler):  # type: ignore[no-untyped-def]
+            return None
+
+    kanban_warden.register(PluginContextLike())
+
+    assert kanban_warden._SUPERVISOR is existing
+    monkeypatch.setattr(kanban_warden, "_SUPERVISOR", None)
 
 
 def test_leader_lock_allows_only_one_active_owner(tmp_path: Path) -> None:

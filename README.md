@@ -171,6 +171,107 @@ kanban-warden demo-lock
 
 `run-once` runs one collection pass using the supplied config. It may mutate Kanban boards only if both `auto_advance.enabled: true` and `auto_advance.dry_run: false` are set.
 
+
+## Root-only subscription policy and decomposed task propagation
+
+The gateway/entry side should subscribe only to root Kanban tasks. A root task is the top-level card that has no parent in `task_links` and may own one or more decomposed child implementation, review, or documentation cards.
+
+Do not manually subscribe every decomposed child task as the normal operating model. Child-task events are intentionally propagated through the Kanban event stream and the `hermes-kanban-warden`/Kanban notification plugin path:
+
+- `BoardEvent` summaries include relationship metadata, including parents, children, `root_task_id`, `review_required`, and comment count.
+- The supervisor tails child events, preserves per-board cursors, and feeds the notification/action state machine from those events.
+- Notification decisions are idempotent and queued in the warden state DB outbox when notifications are enabled.
+- Health sweeps detect root/child coordination problems such as a root task not being closed after all children are done.
+
+Manual child-task subscription is reserved for explicit operator requests, debugging, or temporary recovery when the normal warden/notification path is unavailable. Remove temporary child subscriptions after the incident so routine decomposed traffic continues to flow through the root-only entry policy.
+
+Why this matters: subscribing both a root task and all decomposed children at the entry layer duplicates messages and can hide regressions where `kanban_warden.enabled: true` is configured but the supervisor is not actually running.
+
+## Hairou environment runbook
+
+Canonical company checkout:
+
+```bash
+cd /data/hairou/project/kanban-warden
+```
+
+When operating from the central Hermes host instead of an already-routed hairoudev shell, prefix commands with SSH, for example:
+
+```bash
+ssh hairoudev 'cd /data/hairou/project/kanban-warden && uv run --extra dev pytest -q'
+```
+
+### Configuration checks
+
+Inspect the active Hairou profile configuration without printing secrets. The only required values for supervisor startup are the plugin entry and `kanban_warden.enabled: true`:
+
+```bash
+uv run --extra dev python scripts/check_hairou_warden.py --config ~/.hermes/profiles/hairou/config.yaml --skip-dry-run
+```
+
+The script reports whether `plugins.enabled` contains `kanban-warden`, whether `kanban_warden.enabled` parses as true, the configured board selector, notification/auto-advance booleans, and safe supervisor log hints. It does not print token-like values.
+
+If the target profile uses a different Hermes home or config file, pass it explicitly:
+
+```bash
+uv run --extra dev python scripts/check_hairou_warden.py --config /path/to/config.yaml --hermes-home /path/to/.hermes --profile hairou
+```
+
+### Dry-run and status
+
+Run a read-only collection pass before enabling real auto-advance:
+
+```bash
+kanban-warden --config ~/.hermes/profiles/hairou/config.yaml --profile hairou dry-run
+```
+
+Check effective supervisor status and leader-lock ownership:
+
+```bash
+kanban-warden --config ~/.hermes/profiles/hairou/config.yaml --profile hairou status
+```
+
+Expected healthy signs:
+
+- `enabled` is `true` in status output.
+- `leader_lock.enabled` is `true` unless intentionally disabled for a one-shot test.
+- `leader_lock.active` is true after a running supervisor or explicit `run-once` has acquired the lease.
+- `state` includes board cursors/runtime metadata after dry-run or normal ticks.
+- `dry_run.status.policies.auto_advance.dry_run` remains true unless an operator intentionally enables board mutations.
+
+### Supervisor health and logs
+
+The plugin writes log lines with the `kanban-warden` prefix. Key startup/runtime lines are:
+
+- `kanban-warden loaded; supervisor enabled profile=<profile>`
+- `kanban-warden supervisor thread started profile=<profile>`
+- `kanban-warden acquired leader lock owner=<profile>:<pid>`
+- `kanban-warden health sweep profile=<profile> ... findings=<n>`
+- `kanban-warden tick profile=<profile> boards=<n> new_events=<n> health_findings=<n> dry_run=<bool> notifications=<bool>`
+
+If logs show `kanban-warden loaded; supervisor disabled` while the profile config has `kanban_warden.enabled: true`, treat it as a regression in plugin config loading or profile routing and run the tests in `tests/test_warden.py` before changing production settings.
+
+Common log locations depend on how Hermes is supervised in the environment. Check the active process manager first, then inspect the configured stdout/stderr target. Example local checks:
+
+```bash
+ps -ef | grep -E 'hermes|kanban-warden' | grep -v grep
+journalctl --user -u hermes -n 200 --no-pager  # if a user systemd unit is used
+```
+
+### Regression test commands
+
+Run these in the canonical checkout before handing off changes:
+
+```bash
+uv run --extra dev pytest -q
+uv run --extra dev ruff check src tests scripts
+uv run --extra dev mypy src/kanban_warden
+uv run --extra dev python scripts/check_hairou_warden.py --config examples/config.yaml --skip-dry-run
+uv run --extra dev python scripts/verify_mvp.py
+```
+
+No command above should require or print secrets. Use synthetic test data only.
+
 `demo-lock` shows that two independent owners cannot both hold the active leader lease:
 
 ```json
