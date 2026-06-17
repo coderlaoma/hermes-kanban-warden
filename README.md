@@ -41,7 +41,9 @@ The plugin has three cooperating layers:
 2. Supervisor event collector
    - Starts from Hermes plugin registration when `kanban_warden.enabled` is true.
    - Uses a SQLite leader lock so only one supervisor owner acts at a time.
-   - Discovers legacy and named Kanban boards, tails `task_events`, persists per-board cursors, enriches events with task relationships, and runs read-only health sweeps.
+   - Discovers legacy and named Kanban boards, including shared root boards when running from a profile-scoped Hermes home.
+   - Tails `task_events`, persists per-board cursors, enriches events with task relationships, and runs health sweeps.
+   - Health sweeps include dependency-deadlock remediation proposals for recovery cards stuck behind their own blocked source card and stale TODO cards whose parents are already done.
 
 3. Notification and auto-advance state machine
    - Plans actions for review-required blocks, reviewer approve/needs-changes outcomes, stale running tasks, worker failures, and retry exhaustion.
@@ -115,7 +117,11 @@ kanban_warden:
     event_interval_seconds: 5
     health_sweep_seconds: 60
 
+  # Optional overrides. By default the state DB stays in the active profile home,
+  # while board discovery scans the shared ~/.hermes/kanban/boards tree when the
+  # plugin runs from ~/.hermes/profiles/<profile>.
   state_db_path: null
+  board_db_path: null
   hermes_home: null
   log_level: INFO
 
@@ -144,6 +150,8 @@ Key settings:
 
 - `kanban_warden.enabled`: starts the background supervisor at plugin registration.
 - `kanban_warden.boards`: `"*"` discovers all visible boards; a list pins specific board names.
+- `kanban_warden.board_db_path`: optional single-board DB override; otherwise discovery honors `HERMES_KANBAN_DB`, legacy `kanban.db`, and shared named boards under `~/.hermes/kanban/boards/*/kanban.db`.
+- `kanban_warden.hermes_home`: optional shared Hermes home override. When omitted from a profile home such as `~/.hermes/profiles/hairou`, named board discovery automatically uses the root `~/.hermes` tree.
 - `leader_lock.enabled`: protects against duplicate supervisors. `lease_seconds` controls lock expiry; `heartbeat_seconds` controls refresh cadence.
 - `loop.event_interval_seconds`: event polling interval for the background loop.
 - `loop.health_sweep_seconds`: interval for stale/health checks.

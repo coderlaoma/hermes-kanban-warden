@@ -79,6 +79,7 @@ def _to_dict(config: KanbanWardenConfig) -> dict[str, Any]:
     return {
         "enabled": config.enabled,
         "boards": config.boards,
+        "board_db_path": config.board_db_path,
         "leader_lock": config.leader_lock.__dict__,
         "loop": config.loop.__dict__,
         "notifications": config.notifications.__dict__,

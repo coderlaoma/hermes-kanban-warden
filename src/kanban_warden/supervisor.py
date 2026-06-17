@@ -5,16 +5,17 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import sqlite3
 import tempfile
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from .actions import KanbanActionEngine
 from .board import BoardEventTailer, analyze_health, default_hermes_home, discover_boards
-from .config import KanbanWardenConfig
+from .config import BoardDatabase, KanbanWardenConfig, discover_board_databases
 from .lock import LeaderLock
+from .remediation import open_board_connection, report_to_dict, run_deadlock_remediation
 from .state import WardenStateStore
 
 LOGGER = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class WardenSupervisor:
         self._thread: threading.Thread | None = None
         self._last_heartbeat = 0.0
         self._last_health_sweep = 0.0
+        self._last_health_report: dict[str, Any] | None = None
 
     def start(self) -> bool:
         if not self.config.enabled:
@@ -183,6 +185,7 @@ class WardenSupervisor:
                 "auto_advance": self.config.auto_advance.__dict__,
                 "limits": self.config.limits.__dict__,
             },
+            "last_health_report": self._last_health_report,
         }
 
     def _ensure_leader(self, now: float) -> bool:
@@ -199,6 +202,9 @@ class WardenSupervisor:
 
     def _health_sweep(self, now: float, report: dict[str, Any] | None = None) -> None:
         report = report or self.collect(now=now)
+        remediation_report = self._run_remediation(now)
+        if remediation_report is not None:
+            self._last_health_report = remediation_report
         LOGGER.info(
             "kanban-warden health sweep profile=%s now=%.0f boards=%s findings=%s",
             self.profile_name,
@@ -207,19 +213,63 @@ class WardenSupervisor:
             len(report.get("health", [])),
         )
 
+    def _run_remediation(self, now: float) -> dict[str, Any] | None:
+        board_dbs = discover_board_databases(self.config)
+        if not board_dbs:
+            return None
+        reports: list[dict[str, Any]] = []
+        for board_db in board_dbs:
+            report = self._run_board_remediation(board_db, now=now)
+            if report is not None:
+                reports.append(report)
+        if not reports:
+            return None
+        if len(reports) == 1:
+            return reports[0]
+        return {
+            "board": "*",
+            "boards_scanned": len(reports),
+            "dry_run": self.config.auto_advance.dry_run,
+            "auto_advance": self.config.auto_advance.enabled,
+            "reports": reports,
+            "proposals": [proposal for report in reports for proposal in report.get("proposals", [])],
+        }
+
+    def _run_board_remediation(self, board_db: BoardDatabase, *, now: float) -> dict[str, Any] | None:
+        try:
+            with open_board_connection(board_db.db_path) as conn:
+                report = run_deadlock_remediation(
+                    conn,
+                    board=board_db.name,
+                    now=int(now),
+                    dry_run=self.config.auto_advance.dry_run,
+                    auto_advance=self.config.auto_advance.enabled,
+                    max_retries=self.config.limits.max_retries,
+                    stale_claim_seconds=self.config.limits.stale_claim_seconds,
+                )
+                if self.config.auto_advance.enabled and not self.config.auto_advance.dry_run:
+                    conn.commit()
+                return report_to_dict(report)
+        except sqlite3.Error as exc:
+            LOGGER.warning(
+                "kanban-warden health scan skipped board=%s db_path=%s sqlite_error=%s",
+                board_db.name,
+                board_db.db_path,
+                exc.__class__.__name__,
+            )
+            return {"board": board_db.name, "error": exc.__class__.__name__, "proposals": []}
+
 
 def _default_state_path(config: KanbanWardenConfig) -> str:
     if config.state_db_path:
         return config.state_db_path
-    home = os.environ.get("HERMES_HOME") or os.path.join(Path.home(), ".hermes")
-    return os.path.join(home, "kanban-warden", "state.db")
+    return config.resolved_state_db_path()
 
 
 def _default_lock_path(config: KanbanWardenConfig) -> str:
     if config.leader_lock.db_path:
         return config.leader_lock.db_path
-    home = os.environ.get("HERMES_HOME") or os.path.join(Path.home(), ".hermes")
-    return os.path.join(home, "kanban-warden", "leader-lock.db")
+    return str(config.profile_home_path() / "kanban-warden" / "leader-lock.db")
 
 
 def install_signal_handlers(supervisor: WardenSupervisor) -> None:
