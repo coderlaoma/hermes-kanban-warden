@@ -222,6 +222,32 @@ def analyze_health(
                     }
                 )
 
+            runnable_rows = _safe_select(
+                con,
+                """
+                select child.id as child_id, child.status as child_status
+                from tasks child
+                where coalesce(child.status, '') in ('todo', 'blocked')
+                  and exists (select 1 from task_links l where l.child_id = child.id)
+                  and not exists (
+                    select 1 from task_links l
+                    join tasks parent on parent.id = l.parent_id
+                    where l.child_id = child.id
+                      and coalesce(parent.status, '') not in ('done', 'completed', 'cancelled', 'archived')
+                  )
+                """,
+            )
+            for row in runnable_rows:
+                findings.append(
+                    {
+                        "board": board_name,
+                        "task_id": _row_text(row, "child_id"),
+                        "kind": "blocked_with_all_parents_done",
+                        "child_status": _row_text(row, "child_status"),
+                        "candidate_action": "promote_child_after_blockers_done",
+                    }
+                )
+
             root_rows = _safe_select(
                 con,
                 """

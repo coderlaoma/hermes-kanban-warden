@@ -124,7 +124,13 @@ def _event(
     con.close()
 
 
-def _config(tmp_path: Path, *, dry_run: bool = True, max_retries: int = 2) -> KanbanWardenConfig:
+def _config(
+    tmp_path: Path,
+    *,
+    dry_run: bool = True,
+    max_retries: int = 2,
+    implementer_assignee: str | None = None,
+) -> KanbanWardenConfig:
     return KanbanWardenConfig.from_mapping(
         {
             "enabled": True,
@@ -138,6 +144,7 @@ def _config(tmp_path: Path, *, dry_run: bool = True, max_retries: int = 2) -> Ka
                 "review_required": True,
                 "stale_claims": True,
                 "reviewer_assignee": "reviewer",
+                "implementer_assignee": implementer_assignee,
             },
             "limits": {
                 "max_retries": max_retries,
@@ -229,11 +236,191 @@ def test_review_approve_and_needs_changes_comment_and_unblock_source_once(tmp_pa
         WardenSupervisor(config, profile_name="tester").collect(now=21)
 
         con = sqlite3.connect(board)
-        assert con.execute("select status from tasks where id = 'impl'").fetchone()[0] == "ready"
+        expected_status = "done" if verdict == "approve" else "ready"
         assert (
-            con.execute("select count(*) from task_comments where task_id = 'impl'").fetchone()[0]
-            == 1
+            con.execute("select status from tasks where id = 'impl'").fetchone()[0]
+            == expected_status
         )
+        assert con.execute("select count(*) from task_comments where task_id = 'impl'").fetchone()[
+            0
+        ] == (2 if verdict == "approve" else 1)
+
+
+
+def test_review_needs_changes_creates_dedicated_implementer_followup_and_backfills_subscription(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(con, "impl", title="Impl", status="blocked", assignee="hairou", created_at=1)
+    _insert_real_task(
+        con, "review_impl", title="Review", status="done", assignee="reviewer", created_at=2
+    )
+    con.execute("insert into task_links(parent_id, child_id) values (?, ?)", ("impl", "review_impl"))
+    con.execute(
+        "insert into kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("impl", "telegram", "chat-1", "thread-1", "user-1", "hairou-feishu", 3, 0),
+    )
+    con.commit()
+    con.close()
+    review_body = "NEEDS-CHANGES: add focused regression test and preserve existing flows"
+    _event(
+        board,
+        "review_impl",
+        "completed",
+        {"verdict": "NEEDS-CHANGES", "source_task": "impl", "body": review_body},
+        4,
+    )
+
+    supervisor = WardenSupervisor(config, profile_name="tester")
+    report = supervisor.collect(now=20)
+    second = supervisor.collect(now=21)
+
+    followup_actions = [
+        action for action in report["planned_actions"] if action["kind"] == "create_implementer_followup"
+    ]
+    assert len(followup_actions) == 1
+    con = sqlite3.connect(board)
+    followup = con.execute(
+        "select id, title, body, status, assignee, created_by, idempotency_key from tasks where id = ?",
+        ("fix_impl_review_impl",),
+    ).fetchone()
+    assert followup is not None
+    assert followup[1] == "Fix review changes for impl"
+    assert "NEEDS-CHANGES" in followup[2]
+    assert review_body in followup[2]
+    assert followup[3] == "ready"
+    assert followup[4] == "hairou"
+    assert followup[5] == "kanban-warden"
+    assert followup[6] == "implementer-followup:default:review_impl:impl"
+    assert con.execute(
+        "select count(*) from task_links where parent_id = ? and child_id = ?",
+        ("impl", "fix_impl_review_impl"),
+    ).fetchone()[0] == 1
+    assert con.execute(
+        "select count(*) from kanban_notify_subs where task_id = ?", ("fix_impl_review_impl",)
+    ).fetchone()[0] == 1
+    assert con.execute(
+        "select last_event_id from kanban_notify_subs where task_id = ?", ("fix_impl_review_impl",)
+    ).fetchone()[0] >= 2
+    assert con.execute("select count(*) from tasks where id = ?", ("fix_impl_review_impl",)).fetchone()[0] == 1
+    assert not any(
+        result["applied"] and result["kind"] == "create_implementer_followup"
+        for result in second["action_results"]
+    )
+    assert any(
+        row["key"] == "implementer-followup:default:review_impl:impl" and row["status"] == "done"
+        for row in WardenStateStore(config.state_db_path or "").snapshot()["action_log"]
+    )
+    assert report["state"]["notification_outbox_count"] >= 1
+
+
+def test_review_needs_changes_without_source_assignee_does_not_assign_followup_to_reviewer(
+    tmp_path: Path,
+) -> None:
+    for case_name, source_assignee in (("blank", ""), ("missing", None)):
+        config = _config(tmp_path / case_name, dry_run=False)
+        board = Path(config.hermes_home or "") / "kanban.db"
+        _init_real_schema_board(board)
+        con = sqlite3.connect(board)
+        con.execute(
+            """
+            insert into tasks(id, title, status, assignee, created_at, workspace_kind)
+            values (?, ?, ?, ?, ?, ?)
+            """,
+            ("impl", "Impl", "blocked", source_assignee, 1, "scratch"),
+        )
+        _insert_real_task(
+            con, "review_impl", title="Review", status="done", assignee="reviewer", created_at=2
+        )
+        con.execute(
+            "insert into task_links(parent_id, child_id) values (?, ?)", ("impl", "review_impl")
+        )
+        con.commit()
+        con.close()
+        _event(
+            board,
+            "review_impl",
+            "completed",
+            {"verdict": "NEEDS-CHANGES", "source_task": "impl", "body": "fix it"},
+            4,
+        )
+
+        report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+        con = sqlite3.connect(board)
+        assert (
+            con.execute("select count(*) from tasks where id = ?", ("fix_impl_review_impl",)).fetchone()[0]
+            == 0
+        )
+        assert not con.execute(
+            "select 1 from tasks where id = ? and assignee = ?",
+            ("fix_impl_review_impl", "reviewer"),
+        ).fetchone()
+        comments = [
+            row[0] for row in con.execute("select body from task_comments where task_id = ?", ("impl",))
+        ]
+        assert any("missing implementer assignee" in body for body in comments)
+        assert any(
+            result["kind"] == "create_implementer_followup"
+            and result["note"] == "missing-implementer-assignee"
+            for result in report["action_results"]
+        )
+
+
+
+def test_review_needs_changes_uses_configured_implementer_fallback_not_reviewer(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False, implementer_assignee="hairou")
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.execute(
+        """
+        insert into tasks(id, title, status, assignee, created_at, workspace_kind)
+        values (?, ?, ?, ?, ?, ?)
+        """,
+        ("impl", "Impl", "blocked", None, 1, "scratch"),
+    )
+    _insert_real_task(
+        con, "review_impl", title="Review", status="done", assignee="reviewer", created_at=2
+    )
+    con.execute("insert into task_links(parent_id, child_id) values (?, ?)", ("impl", "review_impl"))
+    con.commit()
+    con.close()
+    _event(
+        board,
+        "review_impl",
+        "completed",
+        {"verdict": "NEEDS-CHANGES", "source_task": "impl", "body": "fix it"},
+        4,
+    )
+
+    WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    con = sqlite3.connect(board)
+    followup = con.execute(
+        "select assignee, status from tasks where id = ?", ("fix_impl_review_impl",)
+    ).fetchone()
+    assert followup == ("hairou", "ready")
 
 
 def test_stale_running_retry_budget_escalates_after_retries(tmp_path: Path) -> None:
@@ -517,5 +704,164 @@ def test_ensure_subscription_no_source_health_finding_is_retryable_when_source_a
     con = sqlite3.connect(board)
     assert (
         con.execute("select count(*) from kanban_notify_subs where task_id = 'child'").fetchone()[0]
+        == 1
+    )
+
+
+def _insert_real_task(
+    con: sqlite3.Connection,
+    task_id: str,
+    *,
+    title: str,
+    status: str,
+    assignee: str = "hairou",
+    created_at: int = 1,
+) -> None:
+    con.execute(
+        "insert into tasks(id, title, status, assignee, created_at, workspace_kind) values (?, ?, ?, ?, ?, ?)",
+        (task_id, title, status, assignee, created_at, "scratch"),
+    )
+
+
+def test_review_approve_finalizes_source_when_review_child_is_done(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(con, "impl", title="Impl", status="blocked", created_at=1)
+    _insert_real_task(
+        con, "review_impl", title="Review", status="done", assignee="reviewer", created_at=2
+    )
+    con.execute(
+        "insert into task_links(parent_id, child_id) values (?, ?)", ("impl", "review_impl")
+    )
+    con.commit()
+    con.close()
+    _event(board, "review_impl", "completed", {"verdict": "APPROVE", "source_task": "impl"}, 3)
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert any(action["kind"] == "finalize" for action in report["planned_actions"])
+    con = sqlite3.connect(board)
+    assert con.execute("select status from tasks where id = ?", ("impl",)).fetchone()[0] == "done"
+    assert (
+        con.execute(
+            "select count(*) from task_events where task_id = ? and kind = ?", ("impl", "completed")
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_blocker_done_promotes_blocked_downstream_and_root_all_children_done_finalizes(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(con, "blocker", title="Blocker", status="done", created_at=1)
+    _insert_real_task(con, "downstream", title="Downstream", status="blocked", created_at=2)
+    _insert_real_task(con, "root", title="Root", status="blocked", assignee="planner", created_at=3)
+    _insert_real_task(con, "child", title="Child", status="done", created_at=4)
+    con.execute(
+        "insert into task_links(parent_id, child_id) values (?, ?)", ("blocker", "downstream")
+    )
+    con.execute("insert into task_links(parent_id, child_id) values (?, ?)", ("root", "child"))
+    con.commit()
+    con.close()
+    _event(board, "blocker", "completed", {"summary": "fixed blocker"}, 5)
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert any(
+        action["kind"] == "promote" and action["task_id"] == "downstream"
+        for action in report["planned_actions"]
+    )
+    assert any(
+        action["kind"] == "finalize" and action["task_id"] == "root"
+        for action in report["planned_actions"]
+    )
+    con = sqlite3.connect(board)
+    assert (
+        con.execute("select status from tasks where id = ?", ("downstream",)).fetchone()[0]
+        == "ready"
+    )
+    assert con.execute("select status from tasks where id = ?", ("root",)).fetchone()[0] == "done"
+
+
+def test_key_comment_markers_are_notificationized_from_comment_events(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(con, "impl", title="Impl", status="blocked", created_at=1)
+    con.execute(
+        "insert into task_comments(task_id, author, body, created_at) values (?, ?, ?, ?)",
+        ("impl", "reviewer", "NEEDS-CHANGES: add focused tests only", 2),
+    )
+    con.commit()
+    con.close()
+    _event(
+        board,
+        "impl",
+        "commented",
+        {"author": "reviewer", "body": "NEEDS-CHANGES: add focused tests only"},
+        3,
+    )
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert any(action["kind"] == "notify" for action in report["planned_actions"])
+    assert report["state"]["notification_outbox_count"] >= 1
+
+
+def test_stale_running_health_also_repairs_subscription_and_queues_notification(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False, max_retries=1)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(con, "root", title="Root", status="running", assignee="planner", created_at=1)
+    _insert_real_task(con, "stale", title="Stale", status="running", created_at=2)
+    con.execute("insert into task_links(parent_id, child_id) values (?, ?)", ("root", "stale"))
+    con.execute(
+        "insert into kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("root", "telegram", "chat-1", "thread-1", "user-1", "hairou-feishu", 3, 0),
+    )
+    con.commit()
+    con.close()
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert any(
+        action["kind"] == "ensure_subscription" and action["task_id"] == "stale"
+        for action in report["planned_actions"]
+    )
+    assert any(
+        action["kind"] == "retry" and action["task_id"] == "stale"
+        for action in report["planned_actions"]
+    )
+    assert report["state"]["notification_outbox_count"] >= 1
+    con = sqlite3.connect(board)
+    assert (
+        con.execute(
+            "select count(*) from kanban_notify_subs where task_id = ?", ("stale",)
+        ).fetchone()[0]
         == 1
     )

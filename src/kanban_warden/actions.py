@@ -22,8 +22,11 @@ ActionKind = Literal[
     "ensure_subscription",
     "notify",
     "create_reviewer",
+    "create_implementer_followup",
     "comment",
     "unblock",
+    "promote",
+    "finalize",
     "retry",
     "escalate",
 ]
@@ -90,6 +93,24 @@ class KanbanActionEngine:
             if not task_id or not kind:
                 continue
             if kind in {"running_without_recent_heartbeat", "running_exceeded_task_timeout"}:
+                actions.append(
+                    self._ensure_subscription(
+                        board_name,
+                        task_id,
+                        f"health:{board_name}:{task_id}:{kind}:ensure-subscription",
+                        f"ensure root/stuck-task subscriptions for health finding: {kind}",
+                        payload=finding,
+                    )
+                )
+                actions.append(
+                    self._notify(
+                        board_name,
+                        task_id,
+                        f"health:{board_name}:{task_id}:{kind}:notify",
+                        f"health finding: {kind}",
+                        payload=finding,
+                    )
+                )
                 recovery_key = (board_name, task_id, "stale-running")
                 if recovery_key in planned_recoveries:
                     continue
@@ -109,6 +130,7 @@ class KanbanActionEngine:
                 "review_approved_but_still_blocked",
                 "root_not_closed_after_children_done",
                 "dependency_blocked_by_stuck_parent",
+                "blocked_with_all_parents_done",
             }:
                 actions.append(
                     self._ensure_subscription(
@@ -128,6 +150,24 @@ class KanbanActionEngine:
                         payload=finding,
                     )
                 )
+                if kind == "blocked_with_all_parents_done":
+                    actions.append(
+                        self._promote(
+                            board_name,
+                            task_id,
+                            f"health:{board_name}:{task_id}:{kind}:promote",
+                            "all parents are done",
+                        )
+                    )
+                elif kind == "root_not_closed_after_children_done":
+                    actions.append(
+                        self._finalize(
+                            board_name,
+                            task_id,
+                            f"health:{board_name}:{task_id}:{kind}:finalize",
+                            "all child cards are done",
+                        )
+                    )
         return actions
 
     def apply(self, db_path: str | Path, actions: list[PlannedAction]) -> list[ActionResult]:
@@ -224,13 +264,40 @@ class KanbanActionEngine:
                     "review approve",
                 )
             )
+            actions.append(
+                self._finalize(
+                    event.board_name,
+                    source_task,
+                    f"review-approve-finalize:{event.board_name}:{task_id}:{source_task}",
+                    "review approve",
+                )
+            )
         elif verdict == "needs-changes" and source_task:
             actions.append(
                 self._comment(
                     event.board_name,
                     source_task,
                     f"review-needs-changes:{event.board_name}:{task_id}:{source_task}",
-                    f"[warden-review-needs-changes] reviewer {task_id} requested changes; implementation card is unblocked for follow-up.",
+                    f"[warden-review-needs-changes] reviewer {task_id} requested changes; implementation follow-up will be dispatched.",
+                )
+            )
+            actions.append(
+                PlannedAction(
+                    kind="create_implementer_followup",
+                    board_name=event.board_name,
+                    task_id=source_task,
+                    target_task_id=None,
+                    idempotency_key=f"implementer-followup:{event.board_name}:{task_id}:{source_task}",
+                    reason="review needs changes",
+                    message=f"Create/dispatch implementer follow-up for {source_task} from review {task_id}",
+                    payload={
+                        "source_event": event.summary(),
+                        "review_task": task_id,
+                        "source_task": source_task,
+                        "review_payload": payload,
+                    },
+                    max_attempts=self.config.limits.max_retries,
+                    dry_run=self.config.auto_advance.dry_run,
                 )
             )
             actions.append(
@@ -353,6 +420,32 @@ class KanbanActionEngine:
             dry_run=self.config.auto_advance.dry_run,
         )
 
+    def _promote(self, board_name: str, task_id: str, key: str, reason: str) -> PlannedAction:
+        return PlannedAction(
+            "promote",
+            board_name,
+            task_id,
+            key,
+            reason,
+            f"Promote {task_id}: {reason}",
+            task_id,
+            {},
+            dry_run=self.config.auto_advance.dry_run,
+        )
+
+    def _finalize(self, board_name: str, task_id: str, key: str, reason: str) -> PlannedAction:
+        return PlannedAction(
+            "finalize",
+            board_name,
+            task_id,
+            key,
+            reason,
+            f"Finalize {task_id}: {reason}",
+            task_id,
+            {},
+            dry_run=self.config.auto_advance.dry_run,
+        )
+
     def _should_ensure_subscription_event(
         self, kind: str, status: str, reason: str, outcome: str
     ) -> bool:
@@ -379,6 +472,8 @@ class KanbanActionEngine:
             return "queued-notification"
         if action.kind == "create_reviewer":
             return self._create_reviewer(db_path, action)
+        if action.kind == "create_implementer_followup":
+            return self._create_implementer_followup(db_path, action)
         if action.kind == "comment":
             return self._insert_comment(db_path, action)
         if action.kind in {"unblock", "retry"}:
@@ -388,6 +483,10 @@ class KanbanActionEngine:
                 _text(action.payload.get("recovery_kind")) or action.kind,
             )
             return self._unblock_task(db_path, action)
+        if action.kind == "promote":
+            return self._promote_task(db_path, action)
+        if action.kind == "finalize":
+            return self._finalize_task(db_path, action)
         if action.kind == "escalate":
             self.state_store.enqueue_notification(action.idempotency_key, action.to_dict())
             return self._insert_comment(db_path, action)
@@ -514,6 +613,59 @@ class KanbanActionEngine:
             )
         return f"reviewer={review_id}"
 
+    def _create_implementer_followup(self, db_path: Path, action: PlannedAction) -> str:
+        source_task = action.task_id
+        review_task = _text(action.payload.get("review_task"))
+        if not source_task or not review_task:
+            return "missing-source-or-review-task"
+        followup_id = _followup_task_id(source_task, review_task)
+        now = int(time.time())
+        with sqlite3.connect(db_path) as con:
+            existing = con.execute("select 1 from tasks where id = ?", (followup_id,)).fetchone()
+            assignee = _task_assignee(con, source_task) or _text(
+                self.config.auto_advance.implementer_assignee
+            )
+            if not assignee:
+                _insert_missing_implementer_assignee_comment(
+                    con,
+                    source_task=source_task,
+                    review_task=review_task,
+                    idempotency_key=action.idempotency_key,
+                    now=now,
+                )
+                return "missing-implementer-assignee"
+            review_request = _review_fix_request(action.payload)
+            _insert_implementer_followup_task(
+                con,
+                followup_id=followup_id,
+                source_task=source_task,
+                review_task=review_task,
+                assignee=assignee,
+                body=review_request,
+                idempotency_key=action.idempotency_key,
+                now=now,
+            )
+            if _table_exists(con, "task_links"):
+                con.execute(
+                    "insert or ignore into task_links(parent_id, child_id) values (?, ?)",
+                    (source_task, followup_id),
+                )
+            sub_note = _backfill_followup_subscriptions(con, source_task, followup_id, action.payload, now)
+            if not existing:
+                _insert_event(
+                    con,
+                    followup_id,
+                    "created",
+                    {
+                        "by": "kanban-warden",
+                        "source_task": source_task,
+                        "review_task": review_task,
+                        "idempotency_key": action.idempotency_key,
+                    },
+                    now,
+                )
+            return f"implementer_followup={followup_id} assignee={assignee} {sub_note}"
+
     def _insert_comment(self, db_path: Path, action: PlannedAction) -> str:
         task_id = action.target_task_id or action.task_id
         if not task_id:
@@ -564,6 +716,269 @@ class KanbanActionEngine:
             )
         return "unblocked"
 
+    def _promote_task(self, db_path: Path, action: PlannedAction) -> str:
+        task_id = action.target_task_id or action.task_id
+        if not task_id:
+            return "missing-task"
+        now = time.time()
+        with sqlite3.connect(db_path) as con:
+            row = con.execute("select status from tasks where id = ?", (task_id,)).fetchone()
+            if not row:
+                return "task-missing"
+            if str(row[0]) not in {"todo", "blocked"}:
+                return f"not-promotable:{row[0]}"
+            if not _all_parents_done_or_archived(con, task_id):
+                return "parents-not-done"
+            con.execute("update tasks set status = 'ready' where id = ?", (task_id,))
+            _insert_event(
+                con,
+                task_id,
+                "promoted",
+                {
+                    "by": "kanban-warden",
+                    "reason": action.reason,
+                    "idempotency_key": action.idempotency_key,
+                },
+                now,
+            )
+        return "promoted"
+
+    def _finalize_task(self, db_path: Path, action: PlannedAction) -> str:
+        task_id = action.target_task_id or action.task_id
+        if not task_id:
+            return "missing-task"
+        now = time.time()
+        with sqlite3.connect(db_path) as con:
+            row = con.execute("select status from tasks where id = ?", (task_id,)).fetchone()
+            if not row:
+                return "task-missing"
+            if str(row[0]) in {"done", "completed", "cancelled", "archived"}:
+                return f"already-terminal:{row[0]}"
+            if not _children_done_or_archived(con, task_id):
+                return "children-not-done"
+            if _has_unresolved_needs_changes(con, task_id):
+                return "unresolved-needs-changes"
+            columns = _table_columns(con, "tasks")
+            if "completed_at" in columns:
+                con.execute(
+                    "update tasks set status = 'done', completed_at = ? where id = ?",
+                    (now, task_id),
+                )
+            else:
+                con.execute("update tasks set status = 'done' where id = ?", (task_id,))
+            _insert_event(
+                con,
+                task_id,
+                "completed",
+                {
+                    "by": "kanban-warden",
+                    "reason": action.reason,
+                    "idempotency_key": action.idempotency_key,
+                },
+                now,
+            )
+            if _table_exists(con, "task_comments"):
+                _insert_comment_row(
+                    con,
+                    task_id=task_id,
+                    body=f"[kanban-warden-finalized] {action.reason}\n\nwarden-action: {action.idempotency_key}",
+                    now=int(now),
+                )
+        return "finalized"
+
+
+def _all_parents_done_or_archived(con: sqlite3.Connection, task_id: str) -> bool:
+    if not _table_exists(con, "task_links"):
+        return True
+    rows = con.execute("select parent_id from task_links where child_id = ?", (task_id,)).fetchall()
+    if not rows:
+        return True
+    for row in rows:
+        status = con.execute("select status from tasks where id = ?", (row[0],)).fetchone()
+        if not status or str(status[0]) not in {"done", "completed", "cancelled", "archived"}:
+            return False
+    return True
+
+
+def _children_done_or_archived(con: sqlite3.Connection, task_id: str) -> bool:
+    if not _table_exists(con, "task_links"):
+        return True
+    rows = con.execute("select child_id from task_links where parent_id = ?", (task_id,)).fetchall()
+    if not rows:
+        return True
+    for row in rows:
+        status = con.execute("select status from tasks where id = ?", (row[0],)).fetchone()
+        if not status or str(status[0]) not in {"done", "completed", "cancelled", "archived"}:
+            return False
+    return True
+
+
+def _has_unresolved_needs_changes(con: sqlite3.Connection, task_id: str) -> bool:
+    if not _table_exists(con, "task_comments"):
+        return False
+    rows = con.execute(
+        "select body from task_comments where task_id = ? order by id", (task_id,)
+    ).fetchall()
+    text = "\n".join(str(row[0] or "").lower() for row in rows)
+    return (
+        "needs-changes" in text or "needs changes" in text
+    ) and "warden-review-approved" not in text
+
+
+
+def _followup_task_id(source_task: str, review_task: str) -> str:
+    return f"fix_{_safe_task_id_part(source_task)}_{_safe_task_id_part(review_task)}"[:120]
+
+
+def _safe_task_id_part(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value.strip())
+    return cleaned.strip("_") or "task"
+
+
+def _task_assignee(con: sqlite3.Connection, task_id: str) -> str | None:
+    if "assignee" not in _table_columns(con, "tasks"):
+        return None
+    row = con.execute("select assignee from tasks where id = ?", (task_id,)).fetchone()
+    assignee = _text(row[0]).strip() if row else ""
+    return assignee or None
+
+
+def _review_fix_request(payload: dict[str, Any]) -> str:
+    review_task = _text(payload.get("review_task"))
+    source_task = _text(payload.get("source_task"))
+    review_payload = payload.get("review_payload") if isinstance(payload.get("review_payload"), dict) else {}
+    assert isinstance(review_payload, dict)
+    request = _text(review_payload.get("body")) or _text(review_payload.get("comment"))
+    if not request:
+        request = _text(review_payload.get("summary")) or _text(review_payload.get("result"))
+    if not request:
+        request = _text(review_payload.get("reason")) or _text(review_payload.get("outcome"))
+    if not request:
+        request = "NEEDS-CHANGES: address the reviewer feedback from the linked review card."
+    if "needs-changes" not in request.lower() and "needs changes" not in request.lower():
+        request = f"NEEDS-CHANGES: {request}"
+    return (
+        f"Follow-up implementation for review {review_task} on source task {source_task}.\n\n"
+        f"Review request:\n{request}\n\n"
+        "Please make the minimal fix requested by the reviewer, preserve existing behavior, "
+        "run focused verification, and hand off for review."
+    )
+
+def _insert_implementer_followup_task(
+    con: sqlite3.Connection,
+    *,
+    followup_id: str,
+    source_task: str,
+    review_task: str,
+    assignee: str,
+    body: str,
+    idempotency_key: str,
+    now: int,
+) -> None:
+    values: dict[str, Any] = {
+        "id": followup_id,
+        "title": f"Fix review changes for {source_task}",
+        "body": body,
+        "status": "ready",
+        "assignee": assignee,
+        "priority": 0,
+        "created_by": "kanban-warden",
+        "created_at": now,
+        "workspace_kind": "scratch",
+        "idempotency_key": idempotency_key,
+        "consecutive_failures": 0,
+        "goal_mode": 0,
+    }
+    _insert_row(con, "tasks", values, conflict="or ignore")
+
+
+def _insert_missing_implementer_assignee_comment(
+    con: sqlite3.Connection,
+    *,
+    source_task: str,
+    review_task: str,
+    idempotency_key: str,
+    now: int,
+) -> None:
+    if not _table_exists(con, "task_comments"):
+        return
+    body = (
+        f"[warden-review-needs-changes] reviewer {review_task} requested changes, "
+        "but a missing implementer assignee means none could be inferred from the source task and "
+        "auto_advance.implementer_assignee is not configured. Follow-up creation skipped "
+        "to avoid assigning implementation work to the reviewer.\n\n"
+        f"warden-action: {idempotency_key}"
+    )
+    existing = con.execute(
+        "select 1 from task_comments where task_id = ? and body like ? limit 1",
+        (source_task, f"%{idempotency_key}%"),
+    ).fetchone()
+    if existing:
+        return
+    _insert_comment_row(con, task_id=source_task, body=body, now=now)
+    _insert_event(
+        con,
+        source_task,
+        "commented",
+        {
+            "by": "kanban-warden",
+            "idempotency_key": idempotency_key,
+            "reason": "missing implementer assignee",
+        },
+        now,
+    )
+
+
+def _backfill_followup_subscriptions(
+    con: sqlite3.Connection,
+    source_task: str,
+    followup_id: str,
+    payload: dict[str, Any],
+    now: int,
+) -> str:
+    if not _table_exists(con, "kanban_notify_subs"):
+        return "subscriptions=table-missing"
+    rows = con.execute(
+        """
+        select platform, chat_id, thread_id, user_id, notifier_profile, last_event_id
+        from kanban_notify_subs
+        where task_id = ?
+        """,
+        (source_task,),
+    ).fetchall()
+    if not rows:
+        return "subscriptions=no-source"
+    cursor = _max_event_id(con)
+    inserted = 0
+    updated = 0
+    for row in rows:
+        before = con.total_changes
+        con.execute(
+            """
+            insert or ignore into kanban_notify_subs(
+              task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id
+            ) values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (followup_id, row[0], row[1], row[2] or "", row[3], row[4], now, cursor),
+        )
+        if con.total_changes > before:
+            inserted += 1
+        else:
+            before_update = con.total_changes
+            con.execute(
+                """
+                update kanban_notify_subs
+                set last_event_id = ?
+                where task_id = ?
+                  and platform = ?
+                  and chat_id = ?
+                  and thread_id = ?
+                  and last_event_id < ?
+                """,
+                (cursor, followup_id, row[0], row[1], row[2] or "", cursor),
+            )
+            updated += con.total_changes - before_update
+    return f"subscriptions=inserted:{inserted},updated:{updated},cursor:{cursor}"
 
 def _insert_reviewer_task(
     con: sqlite3.Connection,
@@ -636,7 +1051,8 @@ def _is_review_required(event: BoardEvent) -> bool:
 def _review_verdict(event: BoardEvent) -> str | None:
     payload = event.payload or {}
     text = " ".join(
-        _text(payload.get(k)).lower() for k in ("verdict", "outcome", "summary", "result", "reason")
+        _text(payload.get(k)).lower()
+        for k in ("verdict", "outcome", "summary", "result", "reason", "body", "comment")
     )
     if "needs-changes" in text or "needs changes" in text:
         return "needs-changes"

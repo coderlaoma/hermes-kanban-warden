@@ -40,6 +40,7 @@ class AutoAdvanceConfig:
     review_required: bool = False
     stale_claims: bool = False
     reviewer_assignee: str = "reviewer"
+    implementer_assignee: str | None = None
 
 
 @dataclass(frozen=True)

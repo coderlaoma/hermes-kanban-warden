@@ -136,7 +136,17 @@ def main() -> int:
         add_task(con, "stale", "Stale worker", "running", "hairou", 1, started_at=1)
         con.execute("insert into task_links(parent_id, child_id) values ('impl', 'review_impl')")
         add_event(con, "impl", "blocked", {"reason": "review-required: inspect diff"}, 3)
-        add_event(con, "review_impl", "completed", {"verdict": "approve", "source_task": "impl"}, 4)
+        add_event(
+            con,
+            "review_impl",
+            "completed",
+            {
+                "verdict": "needs-changes",
+                "source_task": "impl",
+                "body": "NEEDS-CHANGES: add focused regression coverage",
+            },
+            4,
+        )
         con.commit()
         con.close()
 
@@ -164,9 +174,9 @@ def main() -> int:
         dry_config = KanbanWardenConfig.from_mapping(base)
         dry_report = WardenSupervisor(dry_config, profile_name="verify-dry").dry_run(now=20)
         dry_kinds = {action["kind"] for action in dry_report["planned_actions"]}
-        assert {"notify", "create_reviewer", "comment", "unblock", "retry"}.issubset(dry_kinds), (
+        assert {"notify", "create_reviewer", "create_implementer_followup", "comment", "unblock", "retry"}.issubset(
             dry_kinds
-        )
+        ), dry_kinds
         assert all(
             result["applied"] is False and result["note"] == "dry-run"
             for result in dry_report["action_results"]
@@ -184,6 +194,8 @@ def main() -> int:
 
         con = sqlite3.connect(board)
         reviewer_count = count(con, "select count(*) from tasks where id = 'review_impl'")
+        followup_count = count(con, "select count(*) from tasks where id = 'fix_impl_review_impl'")
+        followup_status = con.execute("select status from tasks where id = 'fix_impl_review_impl'").fetchone()[0]
         impl_status = con.execute("select status from tasks where id = 'impl'").fetchone()[0]
         comments = con.execute(
             "select task_id, author, body from task_comments order by id"
@@ -194,6 +206,8 @@ def main() -> int:
         state_con.close()
 
         assert reviewer_count == 1
+        assert followup_count == 1
+        assert followup_status == "ready"
         assert impl_status == "ready"
         assert comments and {row[1] for row in comments} == {"kanban-warden"}
         assert outbox_count >= 1
@@ -216,6 +230,8 @@ def main() -> int:
             ),
             "impl_status_after_apply": impl_status,
             "reviewer_task_count": reviewer_count,
+            "implementer_followup_count": followup_count,
+            "implementer_followup_status": followup_status,
             "comment_count": len(comments),
             "notification_outbox_count": outbox_count,
             "leader_lock_active": status["leader_lock"]["active"],
