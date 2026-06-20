@@ -77,12 +77,14 @@ class TaskFilterConfig:
 class CleanupConfig:
     enabled: bool = False
     archive_done: bool = False
-    done_retention_days: int = 7
+    done_retention_days: int = 3
     purge_archived: bool = False
-    archived_retention_days: int = 15
+    archived_retention_days: int = 7
     gc_enabled: bool = True
-    gc_retention_days: int = 15
+    gc_retention_days: int = 7
     min_interval_seconds: float = 86_400.0
+    state_retention_days: int = 7
+    state_vacuum: bool = True
 
 
 @dataclass(frozen=True)
@@ -229,6 +231,7 @@ def _pick(value: Any, model: type[Any]) -> dict[str, Any]:
             "archive_done",
             "purge_archived",
             "gc_enabled",
+            "state_vacuum",
         }:
             out[key] = _as_bool(raw)
         else:

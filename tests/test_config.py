@@ -18,8 +18,10 @@ def test_task_filter_and_cleanup_config_parse_from_mapping() -> None:
                     "purge_archived": "true",
                     "archived_retention_days": 15,
                     "gc_enabled": "true",
-                    "gc_retention_days": 15,
+                    "gc_retention_days": 7,
                     "min_interval_seconds": 120,
+                    "state_retention_days": 7,
+                    "state_vacuum": "false",
                 },
             }
         }
@@ -33,5 +35,7 @@ def test_task_filter_and_cleanup_config_parse_from_mapping() -> None:
     assert config.cleanup.purge_archived is True
     assert config.cleanup.archived_retention_days == 15
     assert config.cleanup.gc_enabled is True
-    assert config.cleanup.gc_retention_days == 15
+    assert config.cleanup.gc_retention_days == 7
     assert config.cleanup.min_interval_seconds == 120
+    assert config.cleanup.state_retention_days == 7
+    assert config.cleanup.state_vacuum is False

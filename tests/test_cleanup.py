@@ -5,7 +5,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from kanban_warden.cleanup import CleanupPlan, execute_cleanup_plan, plan_cleanup
+from kanban_warden.cleanup import (
+    CleanupPlan,
+    StateCleanupConfig,
+    execute_cleanup_plan,
+    plan_cleanup,
+    prune_state_store,
+)
 
 
 def _init_board(db_path: Path) -> None:
@@ -115,3 +121,102 @@ def test_execute_cleanup_uses_official_cli_with_board_db_env(
     ]
     assert {call["cmd"][0] for call in calls} == {"/opt/hermes/bin/python"}
     assert {call["db"] for call in calls} == {str(db_path)}
+
+
+
+def test_prune_state_store_removes_old_warden_runtime_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    con = sqlite3.connect(db_path)
+    con.executescript(
+        """
+        create table processed_keys (key text primary key, created_at real not null);
+        create table action_log (
+          key text primary key,
+          status text not null,
+          attempts integer not null default 0,
+          note text not null default '',
+          created_at real not null,
+          updated_at real not null
+        );
+        create table notification_outbox (
+          key text primary key,
+          payload_json text not null,
+          status text not null default 'queued',
+          attempts integer not null default 0,
+          last_error text,
+          created_at real not null,
+          updated_at real not null,
+          next_attempt_at real
+        );
+        create table retry_budgets (
+          board_name text not null,
+          task_id text not null,
+          action text not null,
+          attempts integer not null default 0,
+          updated_at real not null,
+          primary key(board_name, task_id, action)
+        );
+        create table runtime_metadata (
+          key text primary key,
+          value_json text not null,
+          updated_at real not null
+        );
+        """
+    )
+    now = 2_000_000.0
+    old = now - 8 * 24 * 3600
+    recent = now - 2 * 24 * 3600
+    con.executemany(
+        "insert into processed_keys(key, created_at) values (?, ?)",
+        [("old_processed", old), ("recent_processed", recent)],
+    )
+    con.executemany(
+        "insert into action_log(key, status, attempts, created_at, updated_at) values (?, ?, 1, ?, ?)",
+        [
+            ("old_done", "done", old, old),
+            ("recent_done", "done", recent, recent),
+            ("old_started", "started", old, old),
+        ],
+    )
+    con.executemany(
+        "insert into notification_outbox(key, payload_json, status, attempts, created_at, updated_at) values (?, '{}', ?, 1, ?, ?)",
+        [
+            ("old_delivered", "delivered", old, old),
+            ("old_exhausted", "exhausted", old, old),
+            ("recent_delivered", "delivered", recent, recent),
+            ("old_retrying", "retrying", old, old),
+        ],
+    )
+    con.executemany(
+        "insert into retry_budgets(board_name, task_id, action, attempts, updated_at) values ('b', ?, 'a', 1, ?)",
+        [("old_retry", old), ("recent_retry", recent)],
+    )
+    con.commit()
+    con.close()
+
+    result = prune_state_store(
+        db_path,
+        now=now,
+        config=StateCleanupConfig(retention_days=7, vacuum=False),
+    )
+
+    assert result["processed_keys_deleted"] == 1
+    assert result["action_log_deleted"] == 1
+    assert result["notification_outbox_deleted"] == 2
+    assert result["retry_budgets_deleted"] == 1
+    con = sqlite3.connect(db_path)
+    assert [row[0] for row in con.execute("select key from processed_keys order by key")] == [
+        "recent_processed"
+    ]
+    assert [row[0] for row in con.execute("select key from action_log order by key")] == [
+        "old_started",
+        "recent_done",
+    ]
+    assert [row[0] for row in con.execute("select key from notification_outbox order by key")] == [
+        "old_retrying",
+        "recent_delivered",
+    ]
+    assert [row[0] for row in con.execute("select task_id from retry_budgets order by task_id")] == [
+        "recent_retry"
+    ]
+    con.close()

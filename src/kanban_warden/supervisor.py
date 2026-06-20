@@ -13,7 +13,7 @@ from typing import Any
 
 from .actions import KanbanActionEngine
 from .board import BoardEventTailer, analyze_health, default_hermes_home, discover_boards
-from .cleanup import execute_cleanup_plan, plan_cleanup
+from .cleanup import StateCleanupConfig, execute_cleanup_plan, plan_cleanup, prune_state_store
 from .config import BoardDatabase, KanbanWardenConfig, discover_board_databases
 from .lock import LeaderLock
 from .outbox import NotificationOutboxDrainer
@@ -317,6 +317,24 @@ class WardenSupervisor:
                 reports.append(report)
             except sqlite3.Error as exc:
                 reports.append({"board": board_db.name, "error": exc.__class__.__name__})
+        state_report = prune_state_store(
+            _default_state_path(self.config),
+            now=now,
+            config=StateCleanupConfig(
+                retention_days=cleanup.state_retention_days,
+                vacuum=cleanup.state_vacuum,
+            ),
+        )
+        if any(
+            state_report.get(key, 0)
+            for key in (
+                "processed_keys_deleted",
+                "action_log_deleted",
+                "notification_outbox_deleted",
+                "retry_budgets_deleted",
+            )
+        ):
+            reports.append({"state": state_report})
         self._last_cleanup = now
         if not reports:
             return None

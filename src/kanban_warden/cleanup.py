@@ -16,6 +16,12 @@ _SECONDS_PER_DAY = 24 * 3600
 
 
 @dataclass(frozen=True)
+class StateCleanupConfig:
+    retention_days: int = 7
+    vacuum: bool = True
+
+
+@dataclass(frozen=True)
 class CleanupPlan:
     archive_done_ids: list[str] = field(default_factory=list)
     purge_archived_ids: list[str] = field(default_factory=list)
@@ -86,6 +92,86 @@ def execute_cleanup_plan(
             )
         )
     return results
+
+
+
+def prune_state_store(
+    db_path: str | os.PathLike[str],
+    *,
+    now: float,
+    config: StateCleanupConfig,
+) -> dict[str, Any]:
+    """Prune bounded Warden runtime state that is safe to rebuild or no longer actionable."""
+
+    path = Path(db_path).expanduser()
+    if not path.exists():
+        return {
+            "state_db_path": str(path),
+            "skipped": "missing",
+            "processed_keys_deleted": 0,
+            "action_log_deleted": 0,
+            "notification_outbox_deleted": 0,
+            "retry_budgets_deleted": 0,
+            "vacuumed": False,
+        }
+    cutoff = float(now) - int(config.retention_days) * _SECONDS_PER_DAY
+    with sqlite3.connect(path) as conn:
+        processed = _delete_if_table_exists(
+            conn,
+            "processed_keys",
+            "created_at < ?",
+            (cutoff,),
+        )
+        actions = _delete_if_table_exists(
+            conn,
+            "action_log",
+            "status in ('done', 'failed') and updated_at < ?",
+            (cutoff,),
+        )
+        notifications = _delete_if_table_exists(
+            conn,
+            "notification_outbox",
+            "status in ('delivered', 'exhausted') and updated_at < ?",
+            (cutoff,),
+        )
+        retries = _delete_if_table_exists(
+            conn,
+            "retry_budgets",
+            "updated_at < ?",
+            (cutoff,),
+        )
+        conn.commit()
+        vacuumed = False
+        if config.vacuum and any((processed, actions, notifications, retries)):
+            conn.execute("pragma wal_checkpoint(truncate)")
+            conn.execute("vacuum")
+            vacuumed = True
+    return {
+        "state_db_path": str(path),
+        "retention_days": int(config.retention_days),
+        "processed_keys_deleted": processed,
+        "action_log_deleted": actions,
+        "notification_outbox_deleted": notifications,
+        "retry_budgets_deleted": retries,
+        "vacuumed": vacuumed,
+    }
+
+
+def _delete_if_table_exists(
+    conn: sqlite3.Connection,
+    table: str,
+    predicate: str,
+    params: tuple[Any, ...],
+) -> int:
+    exists = conn.execute(
+        "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
+    ).fetchone()
+    if not exists:
+        return 0
+    before = int(conn.execute(f"select count(*) from {table}").fetchone()[0])
+    conn.execute(f"delete from {table} where {predicate}", params)
+    after = int(conn.execute(f"select count(*) from {table}").fetchone()[0])
+    return before - after
 
 
 def _ids_for_terminal_cutoff(conn: sqlite3.Connection, status: str, cutoff: int) -> list[str]:
