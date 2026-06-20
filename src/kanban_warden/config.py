@@ -58,6 +58,34 @@ class LimitsConfig:
 
 
 @dataclass(frozen=True)
+class TaskFilterConfig:
+    active_statuses: list[str] = field(
+        default_factory=lambda: [
+            "triage",
+            "todo",
+            "scheduled",
+            "ready",
+            "running",
+            "blocked",
+            "review",
+        ]
+    )
+    ignore_terminal_tasks: bool = False
+
+
+@dataclass(frozen=True)
+class CleanupConfig:
+    enabled: bool = False
+    archive_done: bool = False
+    done_retention_days: int = 7
+    purge_archived: bool = False
+    archived_retention_days: int = 15
+    gc_enabled: bool = True
+    gc_retention_days: int = 15
+    min_interval_seconds: float = 86_400.0
+
+
+@dataclass(frozen=True)
 class BoardDatabase:
     """A discovered Kanban board database and the board name to scan inside it."""
 
@@ -75,6 +103,8 @@ class KanbanWardenConfig:
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
     auto_advance: AutoAdvanceConfig = field(default_factory=AutoAdvanceConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
+    task_filter: TaskFilterConfig = field(default_factory=TaskFilterConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     log_level: str = "INFO"
     hermes_home: str | None = None
     state_db_path: str | None = None
@@ -97,6 +127,8 @@ class KanbanWardenConfig:
             ),
             auto_advance=AutoAdvanceConfig(**_pick(section.get("auto_advance"), AutoAdvanceConfig)),
             limits=LimitsConfig(**_pick(section.get("limits"), LimitsConfig)),
+            task_filter=TaskFilterConfig(**_pick(section.get("task_filter"), TaskFilterConfig)),
+            cleanup=CleanupConfig(**_pick(section.get("cleanup"), CleanupConfig)),
             log_level=str(section.get("log_level", "INFO")),
             hermes_home=str(section["hermes_home"]) if section.get("hermes_home") else None,
             state_db_path=str(section["state_db_path"]) if section.get("state_db_path") else None,
@@ -193,6 +225,10 @@ def _pick(value: Any, model: type[Any]) -> dict[str, Any]:
             "delivery_enabled",
             "evidence_events",
             "evidence_comments",
+            "ignore_terminal_tasks",
+            "archive_done",
+            "purge_archived",
+            "gc_enabled",
         }:
             out[key] = _as_bool(raw)
         else:

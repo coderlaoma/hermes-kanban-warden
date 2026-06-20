@@ -104,19 +104,28 @@ class BoardEventTailer:
     def __init__(self, state_store: WardenStateStore) -> None:
         self.state_store = state_store
 
-    def tail(self, board_name: str, db_path: str | Path, *, limit: int = 500) -> list[BoardEvent]:
+    def tail(
+        self,
+        board_name: str,
+        db_path: str | Path,
+        *,
+        limit: int = 500,
+        active_statuses: set[str] | None = None,
+    ) -> list[BoardEvent]:
         path = Path(db_path)
         cursor = self.state_store.get_cursor(board_name)
-        events = _read_events(board_name, path, cursor, limit=limit)
+        events = _read_events(board_name, path, cursor, limit=limit, active_statuses=active_statuses)
         max_event_id = cursor
+        active_events: list[BoardEvent] = []
         for event in events:
+            max_event_id = max(max_event_id, event.event_id)
+            if active_statuses is not None and event.task_status not in active_statuses:
+                continue
             if self.state_store.mark_processed(event.idempotency_key()):
-                max_event_id = max(max_event_id, event.event_id)
-            else:
-                max_event_id = max(max_event_id, event.event_id)
+                active_events.append(event)
         if max_event_id != cursor:
             self.state_store.set_cursor(board_name, max_event_id)
-        return events
+        return active_events
 
     def recent(self, board_name: str, db_path: str | Path, *, limit: int = 10) -> list[BoardEvent]:
         return _read_events(board_name, Path(db_path), 0, limit=limit, newest=True)
@@ -344,7 +353,13 @@ def build_relationship(con: sqlite3.Connection, task_id: str | None) -> TaskRela
 
 
 def _read_events(
-    board_name: str, db_path: Path, cursor: int, *, limit: int, newest: bool = False
+    board_name: str,
+    db_path: Path,
+    cursor: int,
+    *,
+    limit: int,
+    newest: bool = False,
+    active_statuses: set[str] | None = None,
 ) -> list[BoardEvent]:
     if not _looks_like_board_db(db_path):
         return []
@@ -352,20 +367,38 @@ def _read_events(
     order = "desc" if newest else "asc"
     with managed_connection(db_path) as con:
         con.row_factory = sqlite3.Row
+        has_tasks = _has_table(con, "tasks")
+        status_select = ", t.status as task_status" if has_tasks else ", null as task_status"
+        status_join = " left join tasks t on t.id = e.task_id" if has_tasks else ""
         rows = _safe_select(
             con,
-            f"select id, task_id, kind, payload, created_at, run_id from task_events where id {op} ? order by id {order} limit ?",
+            f"""
+            select e.id, e.task_id, e.kind, e.payload, e.created_at, e.run_id{status_select}
+            from task_events e{status_join}
+            where e.id {op} ?
+            order by e.id {order}
+            limit ?
+            """,
             (cursor if newest else cursor, limit),
         )
         if newest:
             rows = list(reversed(rows))
-        return [_event_from_row(con, board_name, row) for row in rows]
+        return [_event_from_row(con, board_name, row, active_statuses=active_statuses) for row in rows]
 
 
-def _event_from_row(con: sqlite3.Connection, board_name: str, row: sqlite3.Row) -> BoardEvent:
+def _event_from_row(
+    con: sqlite3.Connection,
+    board_name: str,
+    row: sqlite3.Row,
+    *,
+    active_statuses: set[str] | None = None,
+) -> BoardEvent:
     task_id = _row_text(row, "task_id") or None
     payload = _parse_json(_row_text(row, "payload"))
-    if (
+    task_status = _row_text(row, "task_status") or None
+    if active_statuses is not None and task_status not in active_statuses:
+        relationship = TaskRelationship(task_id=task_id or "")
+    elif (
         payload
         and isinstance(payload.get("reason"), str)
         and "review" in str(payload["reason"]).lower()
@@ -382,7 +415,7 @@ def _event_from_row(con: sqlite3.Connection, board_name: str, row: sqlite3.Row) 
         payload=payload,
         created_at=_row_float(row, "created_at"),
         run_id=_row_int_optional(row, "run_id"),
-        task_status=_task_status(con, task_id),
+        task_status=task_status,
         relationship=relationship,
     )
 
@@ -492,4 +525,3 @@ def _row_int_optional(row: sqlite3.Row, key: str | int) -> int | None:
 def _row_float(row: sqlite3.Row, key: str | int) -> float | None:
     value = row[key]
     return float(value) if value is not None else None
-

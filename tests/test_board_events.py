@@ -108,6 +108,33 @@ def test_tail_events_keeps_independent_persistent_cursors(tmp_path: Path) -> Non
     assert store.get_cursor("alpha") == 1
 
 
+def test_tail_events_skips_terminal_tasks_but_advances_cursor(tmp_path: Path) -> None:
+    db_path = tmp_path / "kanban.db"
+    _init_board(db_path)
+    con = sqlite3.connect(db_path)
+    con.executemany(
+        "insert into tasks(id, title, status, assignee, created_at) values (?, ?, ?, ?, ?)",
+        [
+            ("active", "Active", "blocked", "planner", 1),
+            ("done", "Done", "done", "planner", 1),
+            ("archived", "Archived", "archived", "planner", 1),
+        ],
+    )
+    con.commit()
+    con.close()
+    _event(db_path, "done", "completed", {"result": "ok"}, created_at=2)
+    _event(db_path, "archived", "archived", {}, created_at=3)
+    _event(db_path, "active", "blocked", {"reason": "waiting"}, created_at=4)
+    store = WardenStateStore(tmp_path / "state.db")
+    tailer = BoardEventTailer(store)
+
+    events = tailer.tail("default", db_path, active_statuses={"blocked", "running"})
+
+    assert [event.task_id for event in events] == ["active"]
+    assert store.get_cursor("default") == 3
+    assert tailer.tail("default", db_path, active_statuses={"blocked", "running"}) == []
+
+
 def test_state_store_tracks_idempotency_retry_budget_and_runtime_metadata(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
 

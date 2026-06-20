@@ -13,6 +13,7 @@ from typing import Any
 
 from .actions import KanbanActionEngine
 from .board import BoardEventTailer, analyze_health, default_hermes_home, discover_boards
+from .cleanup import execute_cleanup_plan, plan_cleanup
 from .config import BoardDatabase, KanbanWardenConfig, discover_board_databases
 from .lock import LeaderLock
 from .outbox import NotificationOutboxDrainer
@@ -45,7 +46,9 @@ class WardenSupervisor:
         self._thread: threading.Thread | None = None
         self._last_heartbeat = 0.0
         self._last_health_sweep = 0.0
+        self._last_cleanup = 0.0
         self._last_health_report: dict[str, Any] | None = None
+        self._last_cleanup_report: dict[str, Any] | None = None
 
     def start(self) -> bool:
         if not self.config.enabled:
@@ -113,7 +116,14 @@ class WardenSupervisor:
         for board in boards:
             board_paths[board.name] = str(board.db_path)
             cursor_before = self.state_store.get_cursor(board.name)
-            events = self.event_tailer.tail(board.name, board.db_path)
+            active_statuses = set(self.config.task_filter.active_statuses)
+            events = self.event_tailer.tail(
+                board.name,
+                board.db_path,
+                active_statuses=active_statuses
+                if self.config.task_filter.ignore_terminal_tasks
+                else None,
+            )
             cursor_after = self.state_store.get_cursor(board.name)
             board_reports.append(
                 {
@@ -194,6 +204,7 @@ class WardenSupervisor:
                 "limits": self.config.limits.__dict__,
             },
             "last_health_report": self._last_health_report,
+            "last_cleanup_report": self._last_cleanup_report,
         }
 
     def _ensure_leader(self, now: float) -> bool:
@@ -213,6 +224,9 @@ class WardenSupervisor:
         remediation_report = self._run_remediation(now)
         if remediation_report is not None:
             self._last_health_report = remediation_report
+        cleanup_report = self._run_cleanup(now)
+        if cleanup_report is not None:
+            self._last_cleanup_report = cleanup_report
         LOGGER.info(
             "kanban-warden health sweep profile=%s now=%.0f boards=%s findings=%s",
             self.profile_name,
@@ -266,6 +280,47 @@ class WardenSupervisor:
                 exc.__class__.__name__,
             )
             return {"board": board_db.name, "error": exc.__class__.__name__, "proposals": []}
+
+    def _run_cleanup(self, now: float) -> dict[str, Any] | None:
+        cleanup = self.config.cleanup
+        if not cleanup.enabled:
+            return None
+        if now - self._last_cleanup < cleanup.min_interval_seconds:
+            return None
+        board_dbs = discover_board_databases(self.config)
+        reports: list[dict[str, Any]] = []
+        for board_db in board_dbs:
+            try:
+                with open_board_connection(board_db.db_path) as conn:
+                    plan = plan_cleanup(
+                        conn,
+                        now=now,
+                        done_retention_days=cleanup.done_retention_days,
+                        archived_retention_days=cleanup.archived_retention_days,
+                        archive_done=cleanup.archive_done,
+                        purge_archived=cleanup.purge_archived,
+                    )
+                if not plan.should_run_gc and not plan.archive_done_ids and not plan.purge_archived_ids:
+                    continue
+                report = {"board": board_db.name, "plan": plan.to_dict()}
+                if self.config.auto_advance.dry_run:
+                    report["dry_run"] = True
+                else:
+                    report["dry_run"] = False
+                    report["result"] = execute_cleanup_plan(
+                        plan,
+                        board=board_db.name,
+                        db_path=board_db.db_path,
+                        gc_retention_days=cleanup.gc_retention_days,
+                        run_gc=cleanup.gc_enabled,
+                    )
+                reports.append(report)
+            except sqlite3.Error as exc:
+                reports.append({"board": board_db.name, "error": exc.__class__.__name__})
+        self._last_cleanup = now
+        if not reports:
+            return None
+        return {"board": "*", "reports": reports}
 
 
 def _default_state_path(config: KanbanWardenConfig) -> str:
