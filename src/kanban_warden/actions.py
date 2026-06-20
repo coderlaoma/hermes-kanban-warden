@@ -521,14 +521,35 @@ def _is_review_required(event: BoardEvent) -> bool:
 
 def _review_verdict(event: BoardEvent) -> str | None:
     payload = event.payload or {}
-    text = " ".join(
-        _text(payload.get(k)).lower()
-        for k in ("verdict", "outcome", "summary", "result", "reason", "body", "comment")
-    )
-    if "needs-changes" in text or "needs changes" in text:
-        return "needs-changes"
-    if "approve" in text or "approved" in text:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    assert isinstance(metadata, dict)
+
+    for source in (metadata, payload):
+        approved = source.get("approved")
+        if isinstance(approved, bool):
+            return "approve" if approved else "needs-changes"
+        for key in ("verdict", "outcome"):
+            verdict = _classify_review_verdict(_text(source.get(key)))
+            if verdict:
+                return verdict
+
+    if not event.relationship.review_required:
+        return None
+    for key in ("summary", "result", "reason", "body", "comment"):
+        verdict = _classify_review_verdict(_text(payload.get(key)))
+        if verdict:
+            return verdict
+    return None
+
+
+def _classify_review_verdict(text: str) -> str | None:
+    normalized = text.strip().lower()
+    if not normalized:
+        return None
+    if re.search(r"^\s*(?:approve|approved)\b", normalized):
         return "approve"
+    if re.search(r"^\s*needs[- ]changes\b", normalized):
+        return "needs-changes"
     return None
 
 

@@ -1002,6 +1002,78 @@ def test_key_comment_markers_are_notificationized_from_comment_events(tmp_path: 
     assert report["state"]["notification_outbox_count"] >= 1
 
 
+def test_review_approve_with_descriptive_needs_changes_text_does_not_create_fix_card(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(con, "impl", title="Impl", status="blocked", assignee="hairou", created_at=1)
+    _insert_real_task(
+        con, "review_impl", title="Review", status="done", assignee="reviewer", created_at=2
+    )
+    con.execute(
+        "insert into task_links(parent_id, child_id) values (?, ?)", ("impl", "review_impl")
+    )
+    con.commit()
+    con.close()
+    review_summary = "APPROVE: reviewed committed NEEDS-CHANGES preservation fix; no further changes."
+    _event(
+        board,
+        "review_impl",
+        "completed",
+        {"verdict": "APPROVE", "source_task": "impl", "summary": review_summary},
+        3,
+    )
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert any(action["kind"] == "finalize" for action in report["planned_actions"])
+    assert not any(
+        action["kind"] == "create_implementer_followup" for action in report["planned_actions"]
+    )
+
+
+def test_non_review_done_task_mentions_needs_changes_does_not_create_fix_card(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(con, "t_1175bc9f", title="Root", status="blocked", assignee="planner", created_at=1)
+    _insert_real_task(
+        con,
+        "t_4db9273a",
+        title="Entry orchestration",
+        status="done",
+        assignee="hairou-feishu",
+        created_at=2,
+    )
+    con.execute(
+        "insert into task_links(parent_id, child_id) values (?, ?)", ("t_1175bc9f", "t_4db9273a")
+    )
+    con.commit()
+    con.close()
+    _event(
+        board,
+        "t_4db9273a",
+        "completed",
+        {
+            "summary": "Completed triage for NEEDS-CHANGES implementer follow-up creation behavior.",
+            "metadata": {"source_task": "t_1175bc9f", "role": "entry-orchestration"},
+        },
+        3,
+    )
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert not any(
+        action["kind"] == "create_implementer_followup" for action in report["planned_actions"]
+    )
+
+
 def test_stale_running_health_records_subscription_proposal_and_queues_notification(
     tmp_path: Path,
 ) -> None:
