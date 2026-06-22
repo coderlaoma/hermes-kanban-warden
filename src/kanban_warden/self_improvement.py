@@ -293,6 +293,54 @@ class SelfImprovementEngine:
         )
         return review
 
+    def record_code_change_publication(
+        self,
+        *,
+        proposal_id: str,
+        actor: str,
+        branch_name: str,
+        branch_url: str,
+        pull_request_url: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can record publication")
+        if self._audit_payload(proposal_id, "human_review_approved") is None:
+            raise ValueError("approved human review is required before publication")
+        package_payload = self._audit_payload(proposal_id, "code_change_package_prepared")
+        if package_payload is None:
+            raise ValueError("code-change package must be prepared before publication")
+        if branch_name != str(package_payload.get("branch_name", "")):
+            raise ValueError("publication branch name must match the prepared package")
+        if not pull_request_url:
+            raise ValueError("publication requires a pull request URL")
+        publication = {
+            "proposal_id": proposal_id,
+            "branch_name": branch_name,
+            "branch_url": branch_url,
+            "pull_request_url": pull_request_url,
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="branch_pushed",
+            actor=actor,
+            payload={
+                "proposal_id": proposal_id,
+                "branch_name": branch_name,
+                "branch_url": branch_url,
+            },
+            created_at=created_at,
+        )
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="mr_created",
+            actor=actor,
+            payload=publication,
+            created_at=created_at,
+        )
+        return publication
+
     def _record_proposal_created(
         self, proposal: dict[str, Any], *, created_at: float | None
     ) -> None:

@@ -592,6 +592,104 @@ def test_self_improvement_review_decision_rejects_unknown_decision(tmp_path: Pat
         )
 
 
+def test_self_improvement_records_code_change_publication(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+
+    publication = engine.record_code_change_publication(
+        proposal_id=draft["proposal_id"],
+        actor="kanban-warden",
+        branch_name=draft["patch"]["branch_name"],
+        branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+        pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        created_at=107.0,
+    )
+
+    assert publication == {
+        "proposal_id": draft["proposal_id"],
+        "branch_name": draft["patch"]["branch_name"],
+        "branch_url": "https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+        "pull_request_url": "https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+    }
+    audits = store.recent_improvement_audit(limit=2)
+    assert [entry["event_type"] for entry in audits] == ["branch_pushed", "mr_created"]
+    assert audits[0]["payload"] == {
+        "proposal_id": draft["proposal_id"],
+        "branch_name": draft["patch"]["branch_name"],
+        "branch_url": "https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+    }
+    assert audits[1]["payload"] == publication
+
+
+def test_self_improvement_publication_requires_approved_human_review(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+
+    with pytest.raises(ValueError, match="approved human review"):
+        SelfImprovementEngine(store).record_code_change_publication(
+            proposal_id=draft["proposal_id"],
+            actor="kanban-warden",
+            branch_name=draft["patch"]["branch_name"],
+            branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+            pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+            created_at=107.0,
+        )
+
+
+def test_self_improvement_publication_rejects_branch_mismatch(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+
+    with pytest.raises(ValueError, match="branch name"):
+        engine.record_code_change_publication(
+            proposal_id=draft["proposal_id"],
+            actor="kanban-warden",
+            branch_name="feature/unapproved",
+            branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/feature/unapproved",
+            pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+            created_at=107.0,
+        )
+
+
+def test_self_improvement_publication_requires_pull_request_url(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+
+    with pytest.raises(ValueError, match="pull request"):
+        engine.record_code_change_publication(
+            proposal_id=draft["proposal_id"],
+            actor="kanban-warden",
+            branch_name=draft["patch"]["branch_name"],
+            branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+            pull_request_url="",
+            created_at=107.0,
+        )
+
+
 def test_self_improvement_rejects_non_code_change_approval(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     proposal = store.record_improvement_proposal(
