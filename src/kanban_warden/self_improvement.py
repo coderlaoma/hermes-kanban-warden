@@ -190,6 +190,74 @@ class SelfImprovementEngine:
         )
         return verification
 
+    def prepare_human_review_packet(
+        self, *, proposal_id: str, actor: str, created_at: float | None = None
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can be reviewed")
+        package_payload = self._audit_payload(proposal_id, "code_change_package_prepared")
+        if package_payload is None:
+            raise ValueError("human review packet requires prepared package")
+        verification_payload = self._audit_payload(proposal_id, "verification_passed")
+        if verification_payload is None:
+            raise ValueError("human review packet requires passed verification")
+        signal = self._signal_by_id(str(proposal["signal_id"]))
+        approval = self._approval_by_id(proposal_id)
+        packet = {
+            "proposal_id": proposal_id,
+            "proposal_summary": {
+                "title": proposal["title"],
+                "target": proposal["target"],
+                "level": proposal["level"],
+                "risk": proposal["risk"],
+                "reason": proposal["reason"],
+            },
+            "evidence": {
+                "signal_id": signal["signal_id"],
+                "summary": signal["summary"],
+                "supporting_trace_ids": signal["supporting_trace_ids"],
+                "supporting_outcome_ids": signal["supporting_outcome_ids"],
+            },
+            "package_summary": {
+                "branch_name": package_payload.get("branch_name", ""),
+                "affected_files": _string_list(package_payload.get("affected_files", [])),
+                "mutates_source": bool(package_payload.get("mutates_source", True)),
+                "commit_message": _commit_message(
+                    proposal,
+                    _string_list(package_payload.get("verification_commands", [])),
+                ),
+                "pull_request_title": str(proposal["title"]),
+            },
+            "verification": {
+                "status": str(verification_payload.get("status", "")),
+                "failed_commands": _string_list(verification_payload.get("failed_commands", [])),
+                "command_results": _command_results(
+                    verification_payload.get("command_results", [])
+                ),
+            },
+            "approval": {
+                "approval_id": approval["approval_id"],
+                "actor": approval["actor"],
+                "reason": approval["reason"],
+            },
+            "links": {"branch": "", "pull_request": ""},
+            "rollback_plan": proposal["rollback_value"],
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="human_review_requested",
+            actor=actor,
+            payload={
+                "proposal_id": proposal_id,
+                "verification_status": packet["verification"]["status"],
+                "branch_name": packet["package_summary"]["branch_name"],
+                "pull_request": "",
+            },
+            created_at=created_at,
+        )
+        return packet
+
     def _record_proposal_created(
         self, proposal: dict[str, Any], *, created_at: float | None
     ) -> None:
@@ -212,6 +280,18 @@ class SelfImprovementEngine:
                 return proposal
         raise ValueError(f"unknown improvement proposal: {proposal_id}")
 
+    def _signal_by_id(self, signal_id: str) -> dict[str, Any]:
+        for signal in self.state_store.recent_improvement_signals(limit=1000):
+            if signal["signal_id"] == signal_id:
+                return signal
+        raise ValueError(f"unknown improvement signal: {signal_id}")
+
+    def _approval_by_id(self, proposal_id: str) -> dict[str, Any]:
+        for approval in self.state_store.recent_improvement_approvals(limit=1000):
+            if approval["proposal_id"] == proposal_id and approval["decision"] == "approved":
+                return approval
+        raise ValueError(f"missing approval for improvement proposal: {proposal_id}")
+
     def _is_approved(self, proposal_id: str) -> bool:
         for approval in self.state_store.recent_improvement_approvals(limit=1000):
             if approval["proposal_id"] == proposal_id and approval["decision"] == "approved":
@@ -226,6 +306,13 @@ class SelfImprovementEngine:
             ):
                 return True
         return False
+
+    def _audit_payload(self, proposal_id: str, event_type: str) -> dict[str, Any] | None:
+        for audit in self.state_store.recent_improvement_audit(limit=1000):
+            if audit["subject_id"] == proposal_id and audit["event_type"] == event_type:
+                payload = audit["payload"]
+                return payload if isinstance(payload, dict) else {}
+        return None
 
 
 def _slug_from_scope(scope: str) -> str:
@@ -285,6 +372,12 @@ def _command_result(value: dict[str, Any]) -> dict[str, Any]:
         "exit_code": int(value.get("exit_code", 1)),
         "output": str(value.get("output", ""))[:2000],
     }
+
+
+def _command_results(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [_command_result(item) for item in value if isinstance(item, dict)]
 
 
 def _commit_message(proposal: dict[str, Any], verification_commands: list[str]) -> str:

@@ -384,6 +384,131 @@ def test_self_improvement_verification_requires_prepared_package(tmp_path: Path)
         )
 
 
+def test_self_improvement_prepares_human_review_packet_after_verification(
+    tmp_path: Path,
+) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    signal = store.record_improvement_signal(
+        signal_type="policy_gap",
+        scope="detector.high_activity_low_progress",
+        severity="high",
+        supporting_trace_ids=["trace-101", "trace-117"],
+        supporting_outcome_ids=["outcome-101", "outcome-117"],
+        summary="Need code detector.",
+        recommended_level="E3",
+        created_at=100.0,
+    )
+    engine = SelfImprovementEngine(store)
+    draft = engine.create_code_change_drafts(created_at=101.0)[0]
+    approval = engine.record_code_change_approval(
+        proposal_id=draft["proposal_id"],
+        actor="hairou",
+        allowed_repository="coderlaoma/hermes-kanban-warden",
+        allowed_branch_prefix="warden/improve-",
+        verification_commands=draft["patch"]["verification_commands"],
+        reason="Approved to prepare implementation package only.",
+        created_at=102.0,
+    )
+    package = engine.prepare_code_change_package(proposal_id=draft["proposal_id"], created_at=103.0)
+    verification = engine.record_code_change_verification(
+        proposal_id=draft["proposal_id"],
+        actor="kanban-warden",
+        command_results=[
+            {
+                "command": "uv run pytest tests/test_board_events.py -q",
+                "exit_code": 0,
+                "output": "12 passed",
+            },
+            {"command": "uv run ruff check .", "exit_code": 0, "output": "All checks passed!"},
+            {"command": "uv run mypy src", "exit_code": 0, "output": "Success"},
+        ],
+        created_at=104.0,
+    )
+
+    packet = engine.prepare_human_review_packet(
+        proposal_id=draft["proposal_id"],
+        actor="kanban-warden",
+        created_at=105.0,
+    )
+
+    assert packet == {
+        "proposal_id": draft["proposal_id"],
+        "proposal_summary": {
+            "title": draft["title"],
+            "target": "detector.high_activity_low_progress",
+            "level": "E3",
+            "risk": "medium",
+            "reason": draft["reason"],
+        },
+        "evidence": {
+            "signal_id": signal["signal_id"],
+            "summary": "Need code detector.",
+            "supporting_trace_ids": ["trace-101", "trace-117"],
+            "supporting_outcome_ids": ["outcome-101", "outcome-117"],
+        },
+        "package_summary": {
+            "branch_name": package["branch_name"],
+            "affected_files": package["affected_files"],
+            "mutates_source": False,
+            "commit_message": package["commit_message"],
+            "pull_request_title": package["pull_request_title"],
+        },
+        "verification": {
+            "status": "passed",
+            "failed_commands": [],
+            "command_results": verification["command_results"],
+        },
+        "approval": {
+            "approval_id": approval["approval_id"],
+            "actor": "hairou",
+            "reason": "Approved to prepare implementation package only.",
+        },
+        "links": {"branch": "", "pull_request": ""},
+        "rollback_plan": "do_not_apply_generated_branch",
+    }
+    audit = store.recent_improvement_audit()[0]
+    assert audit["event_type"] == "human_review_requested"
+    assert audit["payload"] == {
+        "proposal_id": draft["proposal_id"],
+        "verification_status": "passed",
+        "branch_name": package["branch_name"],
+        "pull_request": "",
+    }
+
+
+def test_self_improvement_review_packet_requires_passed_verification(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    store.record_improvement_signal(
+        signal_type="policy_gap",
+        scope="detector.high_activity_low_progress",
+        severity="high",
+        supporting_trace_ids=["trace-101"],
+        supporting_outcome_ids=["outcome-101"],
+        summary="Need code detector.",
+        recommended_level="E3",
+        created_at=100.0,
+    )
+    engine = SelfImprovementEngine(store)
+    draft = engine.create_code_change_drafts(created_at=101.0)[0]
+    engine.record_code_change_approval(
+        proposal_id=draft["proposal_id"],
+        actor="hairou",
+        allowed_repository="coderlaoma/hermes-kanban-warden",
+        allowed_branch_prefix="warden/improve-",
+        verification_commands=draft["patch"]["verification_commands"],
+        reason="Approved to prepare implementation package only.",
+        created_at=102.0,
+    )
+    engine.prepare_code_change_package(proposal_id=draft["proposal_id"], created_at=103.0)
+
+    with pytest.raises(ValueError, match="passed verification"):
+        engine.prepare_human_review_packet(
+            proposal_id=draft["proposal_id"],
+            actor="kanban-warden",
+            created_at=104.0,
+        )
+
+
 def test_self_improvement_rejects_non_code_change_approval(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     proposal = store.record_improvement_proposal(
