@@ -406,6 +406,63 @@ class SelfImprovementEngine:
         )
         return deployment
 
+    def record_code_change_rollback(
+        self,
+        *,
+        proposal_id: str,
+        actor: str,
+        reason: str,
+        target_profiles: list[str],
+        restored_commit_sha: str,
+        restored_plugin_version: str,
+        rollback_commands: list[str],
+        health_check_result: dict[str, Any],
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can record rollback")
+        if (
+            self._audit_payload(proposal_id, "deployment_succeeded") is None
+            and self._audit_payload(proposal_id, "deployment_failed") is None
+        ):
+            raise ValueError("deployment record is required before rollback")
+        normalized_profiles = _string_list(target_profiles)
+        if not normalized_profiles:
+            raise ValueError("rollback target profiles are required")
+        normalized_rollback_commands = _string_list(rollback_commands)
+        if not normalized_rollback_commands:
+            raise ValueError("rollback commands are required")
+        rollback = {
+            "proposal_id": proposal_id,
+            "reason": reason,
+            "target_profiles": normalized_profiles,
+            "restored_commit_sha": restored_commit_sha,
+            "restored_plugin_version": restored_plugin_version,
+            "rollback_commands": normalized_rollback_commands,
+            "health_check_result": dict(health_check_result),
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="rollback_started",
+            actor=actor,
+            payload={
+                "proposal_id": proposal_id,
+                "reason": reason,
+                "target_profiles": normalized_profiles,
+                "rollback_commands": normalized_rollback_commands,
+            },
+            created_at=created_at,
+        )
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="rollback_succeeded",
+            actor=actor,
+            payload=rollback,
+            created_at=created_at,
+        )
+        return rollback
+
     def _record_proposal_created(
         self, proposal: dict[str, Any], *, created_at: float | None
     ) -> None:
