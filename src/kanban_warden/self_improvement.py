@@ -1,0 +1,172 @@
+"""Controlled E3 self-improvement draft proposals."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from .state import WardenStateStore
+
+
+class SelfImprovementEngine:
+    """Prepare auditable code-change drafts without mutating source code."""
+
+    def __init__(self, state_store: WardenStateStore) -> None:
+        self.state_store = state_store
+
+    def create_code_change_drafts(
+        self, *, created_at: float | None = None
+    ) -> list[dict[str, Any]]:
+        existing_proposal_ids = {
+            proposal["proposal_id"]
+            for proposal in self.state_store.recent_improvement_proposals(limit=1000)
+        }
+        drafts: list[dict[str, Any]] = []
+        for signal in reversed(self.state_store.recent_improvement_signals(limit=500)):
+            if signal["recommended_level"] != "E3" or signal["signal_type"] != "policy_gap":
+                continue
+            draft = self._draft_for_signal(signal, created_at=created_at)
+            if draft["proposal_id"] not in existing_proposal_ids:
+                self._record_proposal_created(draft, created_at=created_at)
+            existing_proposal_ids.add(draft["proposal_id"])
+            drafts.append(draft)
+        return drafts
+
+    def _draft_for_signal(
+        self, signal: dict[str, Any], *, created_at: float | None
+    ) -> dict[str, Any]:
+        slug = _slug_from_scope(str(signal["scope"]))
+        proposal_id = _proposal_id(
+            proposal_type="code_change",
+            level="E3",
+            signal_id=str(signal["signal_id"]),
+            target=str(signal["scope"]),
+            suggested_value="draft_code_change_plan",
+        )
+        patch = {
+            "branch_name": f"warden/improve-{proposal_id.split(':')[-1]}-{slug}",
+            "affected_files": _affected_files_for_scope(str(signal["scope"])),
+            "verification_commands": _verification_commands_for_scope(str(signal["scope"])),
+            "mutates_source": False,
+        }
+        draft = self.state_store.record_improvement_proposal(
+            proposal_type="code_change",
+            level="E3",
+            signal_id=str(signal["signal_id"]),
+            title=f"Draft code improvement for {slug.replace('-', ' ')}",
+            evidence_summary=str(signal["summary"]),
+            target=str(signal["scope"]),
+            current_value="not_expressible_in_config",
+            suggested_value="draft_code_change_plan",
+            reason="Repeated evidence indicates this behavior needs a detector or code path change.",
+            risk="medium",
+            rollback_value="do_not_apply_generated_branch",
+            approval_required=True,
+            patch=patch,
+            created_at=created_at,
+        )
+        return draft
+
+    def record_code_change_approval(
+        self,
+        *,
+        proposal_id: str,
+        actor: str,
+        allowed_repository: str,
+        allowed_branch_prefix: str,
+        verification_commands: list[str],
+        reason: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can be approved with this method")
+        approval = self.state_store.record_improvement_approval(
+            proposal_id=proposal_id,
+            actor=actor,
+            decision="approved",
+            reason=reason,
+            created_at=created_at,
+        )
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="human_approved",
+            actor=actor,
+            payload={
+                "approved_level": "E3",
+                "allowed_repository": allowed_repository,
+                "allowed_branch_prefix": allowed_branch_prefix,
+                "verification_commands": verification_commands,
+                "reason": reason,
+            },
+            created_at=created_at,
+        )
+        return approval
+
+    def _record_proposal_created(
+        self, proposal: dict[str, Any], *, created_at: float | None
+    ) -> None:
+        self.state_store.record_improvement_audit(
+            subject_id=str(proposal["proposal_id"]),
+            event_type="proposal_created",
+            actor="kanban-warden",
+            payload={
+                "proposal_type": proposal["proposal_type"],
+                "level": proposal["level"],
+                "target": proposal["target"],
+                "mutates_source": proposal["patch"]["mutates_source"],
+            },
+            created_at=created_at,
+        )
+
+    def _proposal_by_id(self, proposal_id: str) -> dict[str, Any]:
+        for proposal in self.state_store.recent_improvement_proposals(limit=1000):
+            if proposal["proposal_id"] == proposal_id:
+                return proposal
+        raise ValueError(f"unknown improvement proposal: {proposal_id}")
+
+
+def _slug_from_scope(scope: str) -> str:
+    return scope.split(".")[-1].replace("_", "-")[:80]
+
+
+def _affected_files_for_scope(scope: str) -> list[str]:
+    if scope == "detector.high_activity_low_progress":
+        return [
+            "src/kanban_warden/board.py",
+            "tests/test_board_events.py",
+            "docs/loop-supervisor/v0.4-self-improvement.md",
+        ]
+    return ["src/kanban_warden/board.py", "tests/test_board_events.py"]
+
+
+def _verification_commands_for_scope(scope: str) -> list[str]:
+    if scope.startswith("detector."):
+        return [
+            "uv run pytest tests/test_board_events.py -q",
+            "uv run ruff check .",
+            "uv run mypy src",
+        ]
+    return ["uv run pytest", "uv run ruff check .", "uv run mypy src"]
+
+
+def _proposal_id(
+    *,
+    proposal_type: str,
+    level: str,
+    signal_id: str,
+    target: str,
+    suggested_value: str,
+) -> str:
+    seed = {
+        "proposal_type": proposal_type,
+        "level": level,
+        "signal_id": signal_id,
+        "target": target,
+        "suggested_value": suggested_value,
+    }
+    digest = hashlib.sha256(
+        json.dumps(seed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"prop:{proposal_type}:{digest}"
