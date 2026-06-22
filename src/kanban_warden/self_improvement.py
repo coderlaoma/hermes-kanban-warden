@@ -341,6 +341,71 @@ class SelfImprovementEngine:
         )
         return publication
 
+    def record_code_change_deployment(
+        self,
+        *,
+        proposal_id: str,
+        actor: str,
+        target_profiles: list[str],
+        commit_sha: str,
+        plugin_version: str,
+        config_changes: dict[str, Any],
+        restart_commands: list[str],
+        health_check_result: dict[str, Any],
+        monitor_window: str,
+        rollback_commands: list[str],
+        status: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can record deployment")
+        if self._audit_payload(proposal_id, "mr_created") is None:
+            raise ValueError("publication is required before deployment")
+        if status not in {"succeeded", "failed"}:
+            raise ValueError("deployment status must be succeeded or failed")
+        normalized_profiles = _string_list(target_profiles)
+        if not normalized_profiles:
+            raise ValueError("deployment target profiles are required")
+        normalized_restart_commands = _string_list(restart_commands)
+        normalized_rollback_commands = _string_list(rollback_commands)
+        if not normalized_rollback_commands:
+            raise ValueError("deployment rollback commands are required")
+        deployment = {
+            "proposal_id": proposal_id,
+            "status": status,
+            "target_profiles": normalized_profiles,
+            "commit_sha": commit_sha,
+            "plugin_version": plugin_version,
+            "config_changes": dict(config_changes),
+            "restart_commands": normalized_restart_commands,
+            "health_check_result": dict(health_check_result),
+            "monitor_window": monitor_window,
+            "rollback_commands": normalized_rollback_commands,
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="deployment_started",
+            actor=actor,
+            payload={
+                "proposal_id": proposal_id,
+                "target_profiles": normalized_profiles,
+                "commit_sha": commit_sha,
+                "plugin_version": plugin_version,
+                "restart_commands": normalized_restart_commands,
+                "monitor_window": monitor_window,
+            },
+            created_at=created_at,
+        )
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type=f"deployment_{status}",
+            actor=actor,
+            payload=deployment,
+            created_at=created_at,
+        )
+        return deployment
+
     def _record_proposal_created(
         self, proposal: dict[str, Any], *, created_at: float | None
     ) -> None:

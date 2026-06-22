@@ -690,6 +690,135 @@ def test_self_improvement_publication_requires_pull_request_url(tmp_path: Path) 
         )
 
 
+def test_self_improvement_records_external_deployment_result(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+    engine.record_code_change_publication(
+        proposal_id=draft["proposal_id"],
+        actor="kanban-warden",
+        branch_name=draft["patch"]["branch_name"],
+        branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+        pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        created_at=107.0,
+    )
+
+    deployment = engine.record_code_change_deployment(
+        proposal_id=draft["proposal_id"],
+        actor="release-bot",
+        target_profiles=["hermes-dev"],
+        commit_sha="abc1234",
+        plugin_version="0.4.0+abc1234",
+        config_changes={"policies": "unchanged"},
+        restart_commands=["systemctl reload hermes-kanban-warden"],
+        health_check_result={"status": "passed", "summary": "dry-run healthy"},
+        monitor_window="30m",
+        rollback_commands=["git revert abc1234", "systemctl reload hermes-kanban-warden"],
+        status="succeeded",
+        created_at=108.0,
+    )
+
+    assert deployment == {
+        "proposal_id": draft["proposal_id"],
+        "status": "succeeded",
+        "target_profiles": ["hermes-dev"],
+        "commit_sha": "abc1234",
+        "plugin_version": "0.4.0+abc1234",
+        "config_changes": {"policies": "unchanged"},
+        "restart_commands": ["systemctl reload hermes-kanban-warden"],
+        "health_check_result": {"status": "passed", "summary": "dry-run healthy"},
+        "monitor_window": "30m",
+        "rollback_commands": ["git revert abc1234", "systemctl reload hermes-kanban-warden"],
+    }
+    audits = store.recent_improvement_audit(limit=2)
+    assert [entry["event_type"] for entry in audits] == [
+        "deployment_started",
+        "deployment_succeeded",
+    ]
+    assert audits[0]["payload"] == {
+        "proposal_id": draft["proposal_id"],
+        "target_profiles": ["hermes-dev"],
+        "commit_sha": "abc1234",
+        "plugin_version": "0.4.0+abc1234",
+        "restart_commands": ["systemctl reload hermes-kanban-warden"],
+        "monitor_window": "30m",
+    }
+    assert audits[1]["payload"] == deployment
+
+
+def test_self_improvement_deployment_requires_publication(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+
+    with pytest.raises(ValueError, match="publication"):
+        engine.record_code_change_deployment(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            target_profiles=["hermes-dev"],
+            commit_sha="abc1234",
+            plugin_version="0.4.0+abc1234",
+            config_changes={"policies": "unchanged"},
+            restart_commands=["systemctl reload hermes-kanban-warden"],
+            health_check_result={"status": "passed"},
+            monitor_window="30m",
+            rollback_commands=["git revert abc1234"],
+            status="succeeded",
+            created_at=108.0,
+        )
+
+
+def test_self_improvement_deployment_rejects_unknown_status(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+    engine.record_code_change_publication(
+        proposal_id=draft["proposal_id"],
+        actor="kanban-warden",
+        branch_name=draft["patch"]["branch_name"],
+        branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+        pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        created_at=107.0,
+    )
+
+    with pytest.raises(ValueError, match="deployment status"):
+        engine.record_code_change_deployment(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            target_profiles=["hermes-dev"],
+            commit_sha="abc1234",
+            plugin_version="0.4.0+abc1234",
+            config_changes={},
+            restart_commands=["systemctl reload hermes-kanban-warden"],
+            health_check_result={"status": "passed"},
+            monitor_window="30m",
+            rollback_commands=["git revert abc1234"],
+            status="running",
+            created_at=108.0,
+        )
+
+
 def test_self_improvement_rejects_non_code_change_approval(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     proposal = store.record_improvement_proposal(
