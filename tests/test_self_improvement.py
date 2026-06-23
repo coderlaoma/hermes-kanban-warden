@@ -593,6 +593,31 @@ def test_self_improvement_records_rejected_human_review_decision(tmp_path: Path)
     assert store.recent_improvement_audit()[0]["event_type"] == "human_review_rejected"
 
 
+@pytest.mark.parametrize(
+    ("reviewer", "reason"),
+    [
+        ("", "Reviewed evidence and verification."),
+        ("lead", ""),
+    ],
+)
+def test_self_improvement_review_decision_requires_identity_metadata(
+    tmp_path: Path,
+    reviewer: str,
+    reason: str,
+) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+
+    with pytest.raises(ValueError, match="human review"):
+        SelfImprovementEngine(store).record_human_review_decision(
+            proposal_id=draft["proposal_id"],
+            reviewer=reviewer,
+            decision="approved",
+            reason=reason,
+            created_at=106.0,
+        )
+
+
 def test_self_improvement_review_decision_requires_requested_review(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     store.record_improvement_signal(
