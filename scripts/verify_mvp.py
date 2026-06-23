@@ -169,9 +169,6 @@ def main() -> int:
             "auto_advance": {
                 "enabled": True,
                 "dry_run": True,
-                "review_required": True,
-                "stale_claims": True,
-                "reviewer_assignee": "reviewer",
             },
             "limits": {"max_retries": 1, "task_timeout_seconds": 10, "stale_claim_seconds": 5},
         }

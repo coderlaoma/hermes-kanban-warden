@@ -71,8 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         "leader_lock_enabled": _as_bool(leader_lock.get("enabled", True)),
         "notifications_enabled": _as_bool(notifications.get("enabled", False)),
         "notification_channel_count": len(notifications.get("channels", []) or []),
-        "auto_advance_enabled": _as_bool(auto_advance.get("enabled", False)),
-        "auto_advance_dry_run": _as_bool(auto_advance.get("dry_run", True)),
+        "auto_advance_enabled": _as_bool(auto_advance.get("enabled", True)),
+        "auto_advance_dry_run": _as_bool(auto_advance.get("dry_run", False)),
+        "reviewer_assignee": warden.get("reviewer_assignee"),
         "hermes_home_hint": str(args.hermes_home)
         if args.hermes_home
         else str(warden.get("hermes_home") or "default"),
@@ -88,12 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         warnings.append("plugins.enabled does not include kanban-warden")
     if not enabled:
         warnings.append("kanban_warden.enabled is false; supervisor will not start")
-    if _as_bool(auto_advance.get("enabled", False)) and not _as_bool(
-        auto_advance.get("dry_run", True)
-    ):
-        warnings.append(
-            "auto_advance can mutate Kanban boards because enabled=true and dry_run=false"
-        )
+    if auto_advance.get("review_required") is not None or auto_advance.get("stale_claims") is not None:
+        warnings.append("auto_advance.review_required/stale_claims are deprecated and ignored")
+    if auto_advance.get("reviewer_assignee") is not None:
+        warnings.append("auto_advance.reviewer_assignee is deprecated; use kanban_warden.reviewer_assignee")
 
     if not args.skip_dry_run:
         cli = _run(_cli_command(args.config, args.profile, "status"))

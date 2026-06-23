@@ -28,9 +28,6 @@ class LoopConfig:
 class NotificationConfig:
     enabled: bool = False
     channels: list[str] = field(default_factory=list)
-    review_required: bool = True
-    stale_tasks: bool = True
-    crash_alerts: bool = True
     delivery_enabled: bool = False
     delivery_batch_size: int = 10
     delivery_max_attempts: int = 3
@@ -42,12 +39,8 @@ class NotificationConfig:
 
 @dataclass(frozen=True)
 class AutoAdvanceConfig:
-    enabled: bool = False
-    dry_run: bool = True
-    review_required: bool = False
-    stale_claims: bool = False
-    reviewer_assignee: str = "reviewer"
-    implementer_assignee: str | None = None
+    enabled: bool = True
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +103,7 @@ class KanbanWardenConfig:
     log_level: str = "INFO"
     hermes_home: str | None = None
     state_db_path: str | None = None
+    reviewer_assignee: str | None = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None) -> KanbanWardenConfig:
@@ -134,6 +128,9 @@ class KanbanWardenConfig:
             log_level=str(section.get("log_level", "INFO")),
             hermes_home=str(section["hermes_home"]) if section.get("hermes_home") else None,
             state_db_path=str(section["state_db_path"]) if section.get("state_db_path") else None,
+            reviewer_assignee=_optional_text(
+                section.get("reviewer_assignee", _legacy_reviewer_assignee(section))
+            ),
         )
 
     def board_names(self) -> list[str] | None:
@@ -220,10 +217,6 @@ def _pick(value: Any, model: type[Any]) -> dict[str, Any]:
             "enabled",
             "once",
             "dry_run",
-            "review_required",
-            "stale_claims",
-            "stale_tasks",
-            "crash_alerts",
             "delivery_enabled",
             "evidence_events",
             "evidence_comments",
@@ -247,6 +240,20 @@ def _parse_boards(value: Any) -> Literal["*"] | list[str]:
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return value
     raise ValueError("kanban_warden.boards must be '*' or a list of board names")
+
+
+def _legacy_reviewer_assignee(section: Mapping[str, Any]) -> Any:
+    auto_advance = section.get("auto_advance")
+    if isinstance(auto_advance, Mapping):
+        return auto_advance.get("reviewer_assignee")
+    return None
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _as_bool(value: Any) -> bool:

@@ -88,6 +88,7 @@ def _to_dict(config: KanbanWardenConfig) -> dict[str, Any]:
         "log_level": config.log_level,
         "hermes_home": config.hermes_home,
         "state_db_path": config.state_db_path,
+        "reviewer_assignee": config.reviewer_assignee,
     }
 
 
