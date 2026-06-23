@@ -413,6 +413,8 @@ class SelfImprovementEngine:
             raise ValueError("deployment plan health check commands are required")
         if not normalized_rollback_commands:
             raise ValueError("deployment plan rollback commands are required")
+        if not monitor_window.strip():
+            raise ValueError("deployment plan monitor window is required")
         plan = {
             "proposal_id": proposal_id,
             "target_profiles": normalized_profiles,
