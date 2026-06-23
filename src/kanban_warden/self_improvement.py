@@ -282,6 +282,10 @@ class SelfImprovementEngine:
             raise ValueError("human review request must be prepared before recording a decision")
         if decision not in {"approved", "rejected"}:
             raise ValueError("human review decision must be approved or rejected")
+        if not reviewer.strip():
+            raise ValueError("human review reviewer is required")
+        if not reason.strip():
+            raise ValueError("human review reason is required")
         review = {
             "proposal_id": proposal_id,
             "reviewer": reviewer,
