@@ -361,6 +361,14 @@ class SelfImprovementEngine:
             raise ValueError("publication is required before merge")
         if pull_request_url != str(publication.get("pull_request_url", "")):
             raise ValueError("merge pull request URL must match publication")
+        if not base_branch.strip():
+            raise ValueError("merge base branch is required")
+        if not merge_commit_sha.strip():
+            raise ValueError("merge commit SHA is required")
+        if not merged_by.strip():
+            raise ValueError("merge actor is required")
+        if not merged_at.strip():
+            raise ValueError("merge timestamp is required")
         merge = {
             "proposal_id": proposal_id,
             "pull_request_url": pull_request_url,
