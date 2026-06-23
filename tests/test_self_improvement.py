@@ -690,6 +690,75 @@ def test_self_improvement_publication_requires_pull_request_url(tmp_path: Path) 
         )
 
 
+def test_self_improvement_records_external_merge_result(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+    engine.record_code_change_publication(
+        proposal_id=draft["proposal_id"],
+        actor="kanban-warden",
+        branch_name=draft["patch"]["branch_name"],
+        branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+        pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        created_at=107.0,
+    )
+
+    merge = engine.record_code_change_merge(
+        proposal_id=draft["proposal_id"],
+        actor="release-bot",
+        pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        base_branch="main",
+        merge_commit_sha="abc1234",
+        merged_by="lead",
+        merged_at="2026-06-23T10:00:00Z",
+        created_at=108.0,
+    )
+
+    assert merge == {
+        "proposal_id": draft["proposal_id"],
+        "pull_request_url": "https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        "base_branch": "main",
+        "merge_commit_sha": "abc1234",
+        "merged_by": "lead",
+        "merged_at": "2026-06-23T10:00:00Z",
+    }
+    audit = store.recent_improvement_audit()[0]
+    assert audit["event_type"] == "mr_merged"
+    assert audit["payload"] == merge
+
+
+def test_self_improvement_merge_requires_publication(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+
+    with pytest.raises(ValueError, match="publication"):
+        engine.record_code_change_merge(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+            base_branch="main",
+            merge_commit_sha="abc1234",
+            merged_by="lead",
+            merged_at="2026-06-23T10:00:00Z",
+            created_at=108.0,
+        )
+
+
 def test_self_improvement_records_external_deployment_result(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_requested_human_review(store)

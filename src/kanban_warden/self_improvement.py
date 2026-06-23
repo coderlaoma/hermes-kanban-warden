@@ -341,6 +341,43 @@ class SelfImprovementEngine:
         )
         return publication
 
+    def record_code_change_merge(
+        self,
+        *,
+        proposal_id: str,
+        actor: str,
+        pull_request_url: str,
+        base_branch: str,
+        merge_commit_sha: str,
+        merged_by: str,
+        merged_at: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can record merge")
+        publication = self._audit_payload(proposal_id, "mr_created")
+        if publication is None:
+            raise ValueError("publication is required before merge")
+        if pull_request_url != str(publication.get("pull_request_url", "")):
+            raise ValueError("merge pull request URL must match publication")
+        merge = {
+            "proposal_id": proposal_id,
+            "pull_request_url": pull_request_url,
+            "base_branch": base_branch,
+            "merge_commit_sha": merge_commit_sha,
+            "merged_by": merged_by,
+            "merged_at": merged_at,
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="mr_merged",
+            actor=actor,
+            payload=merge,
+            created_at=created_at,
+        )
+        return merge
+
     def record_code_change_deployment(
         self,
         *,
