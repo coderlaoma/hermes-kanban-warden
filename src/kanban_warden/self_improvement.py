@@ -411,6 +411,8 @@ class SelfImprovementEngine:
             raise ValueError("merge record is required before deployment plan")
         if commit_sha != str(merge.get("merge_commit_sha", "")):
             raise ValueError("deployment plan commit must match the merge commit")
+        if not plugin_version.strip():
+            raise ValueError("deployment plan plugin version is required")
         normalized_profiles = _string_list(target_profiles)
         if not normalized_profiles:
             raise ValueError("deployment plan target profiles are required")
