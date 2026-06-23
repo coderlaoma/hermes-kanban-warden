@@ -2,7 +2,7 @@
 
 `hermes-kanban-warden` is an MVP Hermes Agent plugin for Kanban boards. It watches Kanban task events, keeps persistent cursors, detects review/stale/failure situations, queues notification decisions, and can optionally apply small auto-advance state transitions after you have inspected `dry-run` output.
 
-MVP version: `0.5.0`
+MVP version: `0.6.0`
 
 GitHub: https://github.com/coderlaoma/hermes-kanban-warden
 
@@ -17,7 +17,7 @@ Kanban-driven Hermes deployments can involve multiple profiles, reviewers, and l
 - Which notifications should be retried later instead of being lost?
 - Did durable Kanban comments/results accidentally contain likely secrets?
 
-The MVP is deliberately conservative. `dry-run` is the default posture for auto-advance; real board mutations require explicit configuration.
+The MVP is deliberately active by default once enabled. Use the CLI `dry-run` command for a read-only preview before changing production profiles.
 
 ## Naming map
 
@@ -67,7 +67,7 @@ hermes plugins update kanban-warden
 
 Pinning to a specific release depends on the Hermes plugin manager version. If
 the local CLI does not support a version flag, update the cloned plugin checkout
-under the active Hermes home to tag `v0.5.0`.
+under the active Hermes home to tag `v0.6.0`.
 
 Development setup from a source checkout:
 
@@ -104,49 +104,31 @@ plugins:
     - kanban-warden
 
 kanban_warden:
+  # Starts the background supervisor when the Hermes profile loads plugins.
   enabled: true
+
+  # "*" scans every visible Kanban board. Use ["default"] or another board list
+  # only when this profile must be pinned to specific boards.
   boards: "*"
 
-  leader_lock:
-    enabled: true
-    lease_seconds: 60
-    heartbeat_seconds: 20
-    db_path: null
-
-  loop:
-    event_interval_seconds: 5
-    health_sweep_seconds: 60
-
-  # Optional overrides. By default the state DB stays in the active profile home,
-  # while board discovery scans the shared ~/.hermes/kanban/boards tree when the
-  # plugin runs from ~/.hermes/profiles/<profile>.
-  state_db_path: null
-  board_db_path: null
-  hermes_home: null
-  log_level: INFO
-
+  # Queue warden decisions into the durable outbox. "origin" means the warden
+  # follows the native Kanban subscription route for the affected task/root.
   notifications:
     enabled: true
     channels:
       - origin
-    review_required: true
-    stale_tasks: true
-    crash_alerts: true
-    delivery_enabled: false
-    delivery_batch_size: 10
-    delivery_max_attempts: 3
-    delivery_backoff_seconds: 60
-    delivery_lease_seconds: 300
-    evidence_events: true
-    evidence_comments: false
 
+  # Normal operating mode. Most actions are gateway-required proposals in the
+  # outbox; use the CLI dry-run command when you need a read-only preview.
   auto_advance:
-    enabled: false
-    dry_run: true
-    review_required: true
-    stale_claims: true
-    reviewer_assignee: reviewer
+    enabled: true
+    dry_run: false
 
+  # Optional. Leave null unless this Hermes environment has a known reviewer
+  # assignee. When null, reviewer routing is left to Kanban/Hermes defaults.
+  reviewer_assignee: null
+
+  # Bounded retry/health thresholds for stale workers and repeated failures.
   limits:
     max_retries: 2
     task_timeout_seconds: 14400
@@ -157,21 +139,23 @@ Key settings:
 
 - `kanban_warden.enabled`: starts the background supervisor at plugin registration.
 - `kanban_warden.boards`: `"*"` discovers all visible boards; a list pins specific board names.
-- `kanban_warden.board_db_path`: optional single-board DB override; otherwise discovery honors `HERMES_KANBAN_DB`, legacy `kanban.db`, and shared named boards under `~/.hermes/kanban/boards/*/kanban.db`.
-- `kanban_warden.hermes_home`: optional shared Hermes home override. When omitted from a profile home such as `~/.hermes/profiles/hairou`, named board discovery automatically uses the root `~/.hermes` tree.
-- `leader_lock.enabled`: protects against duplicate supervisors. `lease_seconds` controls lock expiry; `heartbeat_seconds` controls refresh cadence.
-- `loop.event_interval_seconds`: event polling interval for the background loop.
-- `loop.health_sweep_seconds`: interval for stale/health checks.
-- `notifications.*`: controls which decisions are queued to the durable outbox and whether the native Kanban evidence drainer is active.
-- `notifications.delivery_enabled`: drains queued notification actions by writing redacted evidence to subscribed Kanban tasks. Keep false until dry-run/status output has been inspected.
-- `notifications.delivery_batch_size`, `delivery_max_attempts`, `delivery_backoff_seconds`, and `delivery_lease_seconds`: bound each supervisor tick, retry cadence, and stale `in_progress` lease recovery. Rows move through `queued`, `in_progress`, `delivered`, `retrying`, and `exhausted`.
-- `notifications.evidence_events`: writes a `task_events.kind='commented'` evidence row for the native notifier path.
-- `notifications.evidence_comments`: also writes a human-visible `task_comments` audit comment. This is noisier and defaults off.
-- `auto_advance.enabled`: master switch for applying state-machine actions.
-- `auto_advance.dry_run`: when true, plans actions without mutating Kanban boards.
+- `notifications.enabled`: queues warden decisions to the durable outbox.
+- `notifications.channels`: `origin` keeps routing aligned with native Kanban task subscriptions.
+- `auto_advance.enabled`: turns on the state-machine actions. Current write-like actions are recorded as gateway-required outbox proposals unless a dedicated delivery path handles them.
+- `auto_advance.dry_run`: when true, plans actions without applying them. The normal enabled profile value is `false`; use the CLI `dry-run` command for previews.
+- `reviewer_assignee`: optional fixed reviewer assignee. Leave `null` for portable configs so Kanban/Hermes can route reviews using its own defaults.
 - `limits.max_retries`: retry budget before escalation.
 - `limits.task_timeout_seconds`: long-running task timeout threshold.
 - `limits.stale_claim_seconds`: heartbeat/claim staleness threshold.
+
+Advanced settings are available but intentionally omitted from the default example:
+
+- `leader_lock.*`: duplicate-supervisor protection. Defaults are suitable for normal gateway profiles.
+- `loop.*`: supervisor polling and health sweep cadence.
+- `state_db_path`, `board_db_path`, `hermes_home`, `log_level`: path and logging overrides for unusual deployments.
+- `notifications.delivery_*` and `notifications.evidence_*`: native evidence drainer controls for environments that intentionally write notification evidence rows/comments.
+- `task_filter.*`: active/terminal task filtering for large boards.
+- `cleanup.*`: optional board/state cleanup maintenance.
 
 ## CLI usage
 

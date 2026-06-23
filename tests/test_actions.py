@@ -129,7 +129,6 @@ def _config(
     *,
     dry_run: bool = True,
     max_retries: int = 2,
-    implementer_assignee: str | None = None,
     delivery_enabled: bool = True,
     delivery_max_attempts: int = 3,
     delivery_backoff_seconds: float = 30.0,
@@ -153,10 +152,6 @@ def _config(
             "auto_advance": {
                 "enabled": True,
                 "dry_run": dry_run,
-                "review_required": True,
-                "stale_claims": True,
-                "reviewer_assignee": "reviewer",
-                "implementer_assignee": implementer_assignee,
             },
             "limits": {
                 "max_retries": max_retries,
@@ -193,6 +188,42 @@ def test_review_required_dry_run_plans_notification_and_reviewer_without_mutatin
     )
     con = sqlite3.connect(board)
     assert con.execute("select count(*) from tasks where id = 'review_impl'").fetchone()[0] == 0
+
+
+def test_review_required_reviewer_assignee_is_optional(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=True)
+    assigned = KanbanWardenConfig.from_mapping(
+        {
+            "enabled": True,
+            "hermes_home": str(tmp_path / "assigned" / "home" / ".hermes"),
+            "state_db_path": str(tmp_path / "assigned" / "state.db"),
+            "leader_lock": {"enabled": False},
+            "notifications": {"enabled": True, "channels": ["origin"]},
+            "auto_advance": {"enabled": True, "dry_run": True},
+            "reviewer_assignee": "review-team",
+            "loop": {"health_sweep_seconds": 0},
+        }
+    )
+    for current, expected in ((config, None), (assigned, "review-team")):
+        board = Path(current.hermes_home or "") / "kanban.db"
+        _init_board(board)
+        con = sqlite3.connect(board)
+        con.execute(
+            "insert into tasks(id, title, status, assignee, created_at) values ('impl', 'Impl', 'blocked', 'hairou', 1)"
+        )
+        con.commit()
+        con.close()
+        _event(board, "impl", "blocked", {"reason": "review-required: check diff"}, 2)
+
+        report = WardenSupervisor(current, profile_name="tester").dry_run(now=20)
+
+        reviewer_action = next(
+            action for action in report["planned_actions"] if action["kind"] == "create_reviewer"
+        )
+        if expected is None:
+            assert "assignee" not in reviewer_action["payload"]
+        else:
+            assert reviewer_action["payload"]["assignee"] == expected
 
 
 def test_review_required_apply_queues_reviewer_without_mutating_board(tmp_path: Path) -> None:
@@ -381,10 +412,10 @@ def test_review_needs_changes_without_source_assignee_does_not_assign_followup_t
 
 
 
-def test_review_needs_changes_uses_configured_implementer_fallback_not_reviewer(
+def test_review_needs_changes_followup_remains_gateway_required_without_implementer_fallback(
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path, dry_run=False, implementer_assignee="hairou")
+    config = _config(tmp_path, dry_run=False)
     board = Path(config.hermes_home or "") / "kanban.db"
     _init_real_schema_board(board)
     con = sqlite3.connect(board)
@@ -509,7 +540,7 @@ def test_manual_review_needs_changes_identifies_source_from_body_and_queues_fix_
 def test_manual_review_needs_changes_without_clear_source_context_creates_no_fix_card(
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path, dry_run=False, implementer_assignee="mabu")
+    config = _config(tmp_path, dry_run=False)
     board = Path(config.hermes_home or "") / "kanban.db"
     _init_real_schema_board(board)
     con = sqlite3.connect(board)
@@ -544,7 +575,7 @@ def test_manual_review_needs_changes_without_clear_source_context_creates_no_fix
 def test_generated_fix_followup_needs_changes_does_not_create_nested_fix_card(
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path, dry_run=False, implementer_assignee="mabu")
+    config = _config(tmp_path, dry_run=False)
     board = Path(config.hermes_home or "") / "kanban.db"
     _init_real_schema_board(board)
     con = sqlite3.connect(board)

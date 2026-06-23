@@ -241,10 +241,12 @@ class KanbanActionEngine:
                     idempotency_key=f"reviewer:{event.board_name}:{task_id}",
                     reason="review-required blocked implementation card",
                     message=f"Create/dispatch reviewer for {task_id}",
-                    payload={
-                        "source_event": event.summary(),
-                        "assignee": self.config.auto_advance.reviewer_assignee,
-                    },
+                    payload=_without_none(
+                        {
+                            "source_event": event.summary(),
+                            "assignee": self.config.reviewer_assignee,
+                        }
+                    ),
                     max_attempts=self.config.limits.max_retries,
                     dry_run=self.config.auto_advance.dry_run,
                 )
@@ -631,6 +633,10 @@ def _retryable_no_effect(action: PlannedAction, note: str) -> bool:
 
 def _text(value: Any) -> str:
     return value if isinstance(value, str) else "" if value is None else str(value)
+
+
+def _without_none(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if value is not None}
 
 
 def _slug(*parts: str) -> str:

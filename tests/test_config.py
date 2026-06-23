@@ -1,6 +1,52 @@
 from __future__ import annotations
 
+import yaml
+
 from kanban_warden.config import KanbanWardenConfig
+
+
+def test_default_config_runs_in_active_non_dry_run_mode() -> None:
+    config = KanbanWardenConfig.from_mapping({"kanban_warden": {}})
+
+    assert config.auto_advance.enabled is True
+    assert config.auto_advance.dry_run is False
+    assert config.reviewer_assignee is None
+
+
+def test_example_config_keeps_only_common_operator_settings() -> None:
+    with open("examples/config.yaml", encoding="utf-8") as fh:
+        raw = fh.read()
+    config = yaml.safe_load(raw)
+    warden = config["kanban_warden"]
+
+    assert warden["enabled"] is True
+    assert warden["boards"] == "*"
+    assert warden["notifications"] == {"enabled": True, "channels": ["origin"]}
+    assert warden["auto_advance"] == {"enabled": True, "dry_run": False}
+    assert warden["reviewer_assignee"] is None
+    assert set(warden["limits"]) == {
+        "max_retries",
+        "task_timeout_seconds",
+        "stale_claim_seconds",
+    }
+    assert "leader_lock" not in warden
+    assert "loop" not in warden
+    assert "task_filter" not in warden
+    assert "cleanup" not in warden
+    assert "review_required" not in raw
+    assert "stale_claims" not in raw
+
+
+def test_reviewer_assignee_is_top_level_and_legacy_path_is_still_read() -> None:
+    config = KanbanWardenConfig.from_mapping(
+        {"kanban_warden": {"reviewer_assignee": "review-team"}}
+    )
+    legacy = KanbanWardenConfig.from_mapping(
+        {"kanban_warden": {"auto_advance": {"reviewer_assignee": "legacy-reviewer"}}}
+    )
+
+    assert config.reviewer_assignee == "review-team"
+    assert legacy.reviewer_assignee == "legacy-reviewer"
 
 
 def test_task_filter_and_cleanup_config_parse_from_mapping() -> None:

@@ -1,64 +1,35 @@
-# Example Hermes profile config for hermes-kanban-warden MVP.
-# Merge the relevant sections into the target profile config.yaml.
+# Example Hermes profile config for hermes-kanban-warden.
+# Merge this into the target Hermes profile config.yaml.
 plugins:
   enabled:
     - kanban-warden
 
 kanban_warden:
-  # Master switch. Keep false until you have run `kanban-warden dry-run`.
+  # Starts the background supervisor when the Hermes profile loads plugins.
   enabled: true
 
-  # Discover every board visible to the profile. Use ["default", "team-a"] to pin.
+  # "*" scans every visible Kanban board. Use ["default"] or another board list
+  # only when this profile must be pinned to specific boards.
   boards: "*"
 
-  # Prevent duplicate supervisors from applying the same decisions.
-  leader_lock:
-    enabled: true
-    lease_seconds: 60
-    heartbeat_seconds: 20
-    # Optional override; default is $HERMES_HOME/kanban-warden/leader-lock.db.
-    db_path: null
-
-  # Supervisor polling cadence. Keep event polling short; health sweeps can be slower.
-  loop:
-    event_interval_seconds: 5
-    health_sweep_seconds: 60
-
-  # Durable state/outbox location. Null uses $HERMES_HOME/kanban-warden/state.db.
-  state_db_path: null
-  hermes_home: null
-  log_level: INFO
-
+  # Queue warden decisions into the durable outbox. "origin" means the warden
+  # follows the native Kanban subscription route for the affected task/root.
   notifications:
-    # Queue notification decisions to the warden state DB outbox.
     enabled: true
     channels:
       - origin
-    review_required: true
-    stale_tasks: true
-    crash_alerts: true
-    # Conservative default: keep delivery off until dry-run/status output and
-    # native kanban_notify_subs coverage have been inspected.
-    delivery_enabled: false
-    delivery_batch_size: 10
-    delivery_max_attempts: 3
-    delivery_backoff_seconds: 60
-    # Evidence events are consumed by the existing Kanban native notifier path.
-    # Comments are human-visible and noisier, so leave them off by default.
-    evidence_events: true
-    evidence_comments: false
 
+  # Normal operating mode. Most actions are gateway-required proposals in the
+  # outbox; use the CLI dry-run command when you need a read-only preview.
   auto_advance:
-    # enabled=false means observe and report only. Turn on after reviewing dry-run.
-    enabled: false
-    # dry_run=true plans actions but does not mutate Kanban boards.
-    dry_run: true
-    # Create reviewer cards for implementation cards blocked with review-required.
-    review_required: true
-    # Retry/escalate stale running tasks and worker failures within limits.
-    stale_claims: true
-    reviewer_assignee: reviewer
+    enabled: true
+    dry_run: false
 
+  # Optional. Leave null unless this Hermes environment has a known reviewer
+  # assignee. When null, reviewer routing is left to Kanban/Hermes defaults.
+  reviewer_assignee: null
+
+  # Bounded retry/health thresholds for stale workers and repeated failures.
   limits:
     max_retries: 2
     task_timeout_seconds: 14400
