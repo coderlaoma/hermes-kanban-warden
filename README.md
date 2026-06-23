@@ -2,7 +2,7 @@
 
 `hermes-kanban-warden` is an MVP Hermes Agent plugin for Kanban boards. It watches Kanban task events, keeps persistent cursors, detects review/stale/failure situations, queues notification decisions, and can optionally apply small auto-advance state transitions after you have inspected `dry-run` output.
 
-MVP version: `0.6.0`
+MVP version: `0.7.0`
 
 GitHub: https://github.com/coderlaoma/hermes-kanban-warden
 
@@ -67,7 +67,7 @@ hermes plugins update kanban-warden
 
 Pinning to a specific release depends on the Hermes plugin manager version. If
 the local CLI does not support a version flag, update the cloned plugin checkout
-under the active Hermes home to tag `v0.6.0`.
+under the active Hermes home to tag `v0.7.0`.
 
 Development setup from a source checkout:
 

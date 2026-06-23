@@ -82,7 +82,7 @@ class NotificationOutboxDrainer:
         }
         for row in rows:
             try:
-                self._deliver_one(row, board_paths, now=current_time)
+                delivered = self._deliver_one(row, board_paths, now=current_time)
             except _PermanentDeliveryError as exc:
                 self.state_store.mark_notification_retry(
                     row["key"],
@@ -110,13 +110,18 @@ class NotificationOutboxDrainer:
                     report["retrying"] += 1
                 continue
             self.state_store.mark_notification_delivered(row["key"], now=current_time)
-            report["delivered"] += 1
+            if delivered:
+                report["delivered"] += 1
+            else:
+                report["skipped"] += 1
         return report
 
     def _deliver_one(
         self, row: dict[str, Any], board_paths: Mapping[str, str | Path], *, now: float
-    ) -> None:
+    ) -> bool:
         payload = row["payload"] if isinstance(row["payload"], dict) else {}
+        if not _origin_channel_enabled(payload):
+            return False
         board_name = _text(payload.get("board_name")) or _text(payload.get("board")) or "default"
         task_id = _text(payload.get("target_task_id")) or _text(payload.get("task_id"))
         if not task_id:
@@ -137,6 +142,7 @@ class NotificationOutboxDrainer:
             result = self.message_sender.send(target, message)
             if not result.ok:
                 raise _RetryableDeliveryError(result.error or "message send failed")
+        return True
 
     def _delivery_message(
         self,
@@ -228,6 +234,16 @@ def _table_exists(con: sqlite3.Connection, name: str) -> bool:
 def _assert_secret_safe(text: str) -> None:
     if default_scanner().scan(text):
         raise _PermanentDeliveryError("notification evidence contains secret-like text")
+
+
+def _origin_channel_enabled(payload: dict[str, Any]) -> bool:
+    action_payload = payload.get("payload")
+    channels = action_payload.get("channels") if isinstance(action_payload, dict) else None
+    if channels is None:
+        channels = payload.get("channels")
+    if not isinstance(channels, list):
+        return False
+    return any(channel == "origin" for channel in channels)
 
 
 def _title_for_action(kind: str, reason: str) -> str:
