@@ -1270,6 +1270,71 @@ def test_worker_failure_event_does_not_duplicate_native_notification(tmp_path: P
     assert not any('"kind": "notify"' in row[0] for row in rows)
 
 
+def test_long_blocked_reason_sends_tail_only_to_native_subscriber(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(con, "impl", title="Impl", status="blocked", assignee="worker", created_at=1)
+    con.execute(
+        "insert into kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("impl", "feishu", "chat-1", "", "user-1", "hairou-feishu", 2, 0),
+    )
+    con.commit()
+    con.close()
+    native_prefix = "p" * 160
+    tail = "tail detail that Hermes native notifier would omit"
+    _event(board, "impl", "blocked", {"reason": native_prefix + tail}, 3)
+
+    sender = FakeSender()
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
+
+    assert any(
+        action["kind"] == "notify"
+        and action["reason"] == "blocked reason continuation after native truncation"
+        for action in report["planned_actions"]
+    )
+    assert report["outbox_delivery"]["delivered"] == 1
+    assert sender.sent == [("feishu:chat-1", sender.sent[0][1])]
+    message = sender.sent[0][1]
+    assert "[Kanban Warden] blocked reason continued" in message
+    assert "Task: impl" in message
+    assert tail in message
+    assert native_prefix not in message
+
+
+def test_short_blocked_reason_does_not_duplicate_native_notification(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(con, "impl", title="Impl", status="blocked", assignee="worker", created_at=1)
+    con.commit()
+    con.close()
+    _event(board, "impl", "blocked", {"reason": "waiting for reviewer"}, 3)
+
+    sender = FakeSender()
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
+
+    assert not any(action["kind"] == "notify" for action in report["planned_actions"])
+    assert sender.sent == []
+
+
 def test_review_approve_with_descriptive_needs_changes_text_does_not_create_fix_card(
     tmp_path: Path,
 ) -> None:

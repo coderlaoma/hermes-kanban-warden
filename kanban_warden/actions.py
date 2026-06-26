@@ -32,6 +32,7 @@ ActionKind = Literal[
 ]
 
 _BOARD_WRITE_DISABLED = "board-write-disabled"
+_HERMES_NATIVE_BLOCKED_REASON_CHARS = 160
 
 
 @dataclass(frozen=True)
@@ -211,6 +212,10 @@ class KanbanActionEngine:
                 )
             )
 
+        tail_notify = self._plan_blocked_reason_tail(event, reason)
+        if tail_notify is not None:
+            actions.append(tail_notify)
+
         actions.extend(self._plan_blocked_remediation(event, reason))
 
         if _is_review_required(event):
@@ -310,6 +315,28 @@ class KanbanActionEngine:
                 )
             )
         return actions
+
+    def _plan_blocked_reason_tail(
+        self, event: BoardEvent, reason: str
+    ) -> PlannedAction | None:
+        if not self.config.notifications.enabled:
+            return None
+        if event.kind != "blocked" or event.task_status != "blocked" or not event.task_id:
+            return None
+        if len(reason) <= _HERMES_NATIVE_BLOCKED_REASON_CHARS:
+            return None
+        return self._notify(
+            event.board_name,
+            event.task_id,
+            f"blocked-tail:{event.board_name}:{event.task_id}:{event.event_id}",
+            "blocked reason continuation after native truncation",
+            payload={
+                "source_event": event.summary(),
+                "message_template": "blocked_reason_tail",
+                "native_reason_limit": _HERMES_NATIVE_BLOCKED_REASON_CHARS,
+                "reason_tail": reason[_HERMES_NATIVE_BLOCKED_REASON_CHARS:],
+            },
+        )
 
     def _plan_blocked_remediation(self, event: BoardEvent, reason: str) -> list[PlannedAction]:
         if not self.config.blocked_remediation.enabled:
