@@ -152,6 +152,22 @@ class NotificationOutboxDrainer:
         board_name: str,
         task_id: str,
     ) -> str:
+        action_payload = _action_payload(payload)
+        if _text(action_payload.get("message_template")) == "blocked_reason_tail":
+            tail = _text(action_payload.get("reason_tail"))
+            lines = [
+                "[Kanban Warden] blocked reason continued",
+                "",
+                f"Board: {board_name}",
+                f"Task: {task_id}",
+                "",
+                "Native Hermes notification omitted the following part:",
+            ]
+            if tail:
+                lines.append(tail)
+            lines.extend(["", f"Outbox: {row['key']}"])
+            return "\n".join(lines).strip()
+
         action_kind = _text(payload.get("kind"))
         reason = _text(payload.get("reason"))
         message = _text(payload.get("message"))
@@ -244,6 +260,13 @@ def _origin_channel_enabled(payload: dict[str, Any]) -> bool:
     if not isinstance(channels, list):
         return False
     return any(channel == "origin" for channel in channels)
+
+
+def _action_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    nested = payload.get("payload")
+    if isinstance(nested, dict):
+        return nested
+    return payload
 
 
 def _title_for_action(kind: str, reason: str) -> str:
