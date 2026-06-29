@@ -33,6 +33,7 @@ ActionKind = Literal[
 
 _BOARD_WRITE_DISABLED = "board-write-disabled"
 _HERMES_NATIVE_BLOCKED_REASON_CHARS = 160
+_HERMES_NATIVE_COMPLETED_SUMMARY_CHARS = 160
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,9 @@ class KanbanActionEngine:
         tail_notify = self._plan_blocked_reason_tail(event, reason)
         if tail_notify is not None:
             actions.append(tail_notify)
+        completed_tail_notify = self._plan_completed_summary_tail(event)
+        if completed_tail_notify is not None:
+            actions.append(completed_tail_notify)
 
         actions.extend(self._plan_blocked_remediation(event, reason))
 
@@ -335,6 +339,27 @@ class KanbanActionEngine:
                 "message_template": "blocked_reason_tail",
                 "native_reason_limit": _HERMES_NATIVE_BLOCKED_REASON_CHARS,
                 "reason_tail": reason[_HERMES_NATIVE_BLOCKED_REASON_CHARS:],
+            },
+        )
+
+    def _plan_completed_summary_tail(self, event: BoardEvent) -> PlannedAction | None:
+        if not self.config.notifications.enabled:
+            return None
+        if event.kind != "completed" or not event.task_id:
+            return None
+        summary = _text((event.payload or {}).get("summary"))
+        if len(summary) <= _HERMES_NATIVE_COMPLETED_SUMMARY_CHARS:
+            return None
+        return self._notify(
+            event.board_name,
+            event.task_id,
+            f"completed-tail:{event.board_name}:{event.task_id}:{event.event_id}",
+            "completed summary continuation after native truncation",
+            payload={
+                "source_event": event.summary(),
+                "message_template": "completed_summary_tail",
+                "native_summary_limit": _HERMES_NATIVE_COMPLETED_SUMMARY_CHARS,
+                "summary_tail": summary[_HERMES_NATIVE_COMPLETED_SUMMARY_CHARS:],
             },
         )
 
