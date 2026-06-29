@@ -1335,6 +1335,119 @@ def test_short_blocked_reason_does_not_duplicate_native_notification(tmp_path: P
     assert sender.sent == []
 
 
+def test_long_completed_summary_sends_tail_only_to_native_subscriber(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(con, "impl", title="Impl", status="done", assignee="worker", created_at=1)
+    con.execute(
+        "insert into kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("impl", "feishu", "chat-1", "", "user-1", "hairou-feishu", 2, 0),
+    )
+    con.commit()
+    con.close()
+    native_prefix = "p" * 160
+    tail = "tail detail that Hermes native completed notification would omit"
+    _event(board, "impl", "completed", {"summary": native_prefix + tail}, 3)
+
+    sender = FakeSender()
+    supervisor = WardenSupervisor(config, profile_name="tester", message_sender=sender)
+    report = supervisor.collect(now=20)
+    second = supervisor.collect(now=21)
+
+    assert any(
+        action["kind"] == "notify"
+        and action["idempotency_key"] == "completed-tail:default:impl:1"
+        and action["reason"] == "completed summary continuation after native truncation"
+        for action in report["planned_actions"]
+    )
+    assert report["outbox_delivery"]["delivered"] == 1
+    assert second["outbox_delivery"]["processed"] == 0
+    assert sender.sent == [("feishu:chat-1", sender.sent[0][1])]
+    message = sender.sent[0][1]
+    assert "[Kanban Warden] completed summary continued" in message
+    assert "Task: impl" in message
+    assert tail in message
+    assert native_prefix not in message
+
+
+def test_long_completed_summary_uses_root_subscription_when_child_has_no_subscriber(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(con, "root", title="Root", status="running", assignee="planner", created_at=1)
+    _insert_real_task(con, "child", title="Child", status="done", assignee="worker", created_at=2)
+    con.execute("insert into task_links(parent_id, child_id) values (?, ?)", ("root", "child"))
+    con.execute(
+        "insert into kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("root", "feishu", "root-chat", "", "user-1", "hairou-feishu", 3, 0),
+    )
+    con.commit()
+    con.close()
+    native_prefix = "p" * 160
+    tail = "child completion tail for the root subscriber"
+    _event(board, "child", "completed", {"summary": native_prefix + tail}, 4)
+
+    sender = FakeSender()
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
+
+    assert report["outbox_delivery"]["delivered"] == 1
+    assert sender.sent == [("feishu:root-chat", sender.sent[0][1])]
+    assert "Task: child" in sender.sent[0][1]
+    assert tail in sender.sent[0][1]
+
+
+def test_short_completed_summary_does_not_duplicate_native_notification(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(con, "impl", title="Impl", status="done", assignee="worker", created_at=1)
+    con.commit()
+    con.close()
+    _event(board, "impl", "completed", {"summary": "short completion summary"}, 3)
+
+    sender = FakeSender()
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
+
+    assert not any(action["kind"] == "notify" for action in report["planned_actions"])
+    assert sender.sent == []
+
+
 def test_review_approve_with_descriptive_needs_changes_text_does_not_create_fix_card(
     tmp_path: Path,
 ) -> None:

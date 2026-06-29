@@ -2,7 +2,7 @@
 
 `hermes-kanban-warden` is an MVP Hermes Agent plugin for Kanban boards. It watches Kanban task events, keeps persistent cursors, detects review/stale/failure situations, queues notification decisions, and can optionally apply small auto-advance state transitions after you have inspected `dry-run` output.
 
-MVP version: `0.8.2`
+MVP version: `0.8.3`
 
 GitHub: https://github.com/coderlaoma/hermes-kanban-warden
 
@@ -74,7 +74,7 @@ hermes --profile hairou-feishu gateway restart
 
 Pinning to a specific release depends on the Hermes plugin manager version. If
 the local CLI does not support a version flag, update the cloned plugin checkout
-under the active Hermes home to tag `v0.8.2`.
+under the active Hermes home to tag `v0.8.3`.
 
 Development setup from a source checkout:
 
@@ -153,7 +153,7 @@ Key settings:
 
 - `kanban_warden.enabled`: starts the background supervisor at plugin registration.
 - `kanban_warden.boards`: `"*"` discovers all visible boards; a list pins specific board names.
-- `notifications.enabled`: enables native subscription maintenance such as root/stuck-task subscription propagation. Warden does not duplicate normal Kanban terminal-event notifications into its own outbox.
+- `notifications.enabled`: enables native subscription maintenance such as root/stuck-task subscription propagation. Warden does not duplicate normal Kanban terminal-event notifications into its own outbox, except for explicit tail continuations when native blocked reasons or completed summaries exceed the configured safe prefix.
 - `notifications.channels`: reserved for explicitly enqueued notification rows; routine blocked/completed/gave-up/crashed messages are expected to come from Hermes' native Kanban notifier.
 - `auto_advance.enabled`: turns on the state-machine actions. Current write-like actions are recorded as gateway-required outbox proposals unless a dedicated delivery path handles them.
 - `auto_advance.dry_run`: when true, plans actions without applying them. The normal enabled profile value is `false`; use the CLI `dry-run` command for previews.
@@ -201,7 +201,7 @@ Do not manually subscribe every decomposed child task as the normal operating mo
 
 - `BoardEvent` summaries include relationship metadata, including parents, children, `root_task_id`, `review_required`, and comment count.
 - The supervisor tails child events, preserves per-board cursors, and feeds the action state machine from those events.
-- Warden does not duplicate native terminal-event messages into its own outbox, keeping gateway conversation context smaller.
+- Warden does not duplicate native terminal-event messages into its own outbox, keeping gateway conversation context smaller. It only queues explicit continuation rows for known native truncation cases, such as long blocked reasons and long completed summaries.
 - Explicitly queued warden notifications can still be delivered through Hermes `send_message`, but this is not the routine blocked-task path.
 - Health sweeps detect root/child coordination problems such as a root task not being closed after all children are done, or a child that cannot proceed because an upstream dependency is blocked/failed.
 - When a blocked/gave-up/worker-failure child or dependency deadlock is detected, the fallback `ensure_subscription` action copies an existing root subscription to the stuck child (and ensures the root has the same subscription) using `insert or ignore`. This keeps normal entry creation root-only while allowing the native notifier to route the stuck child back to the user during incidents.
@@ -280,7 +280,7 @@ kanban_warden:
     delivery_lease_seconds: 300
 ```
 
-The drainer does not use platform credentials and does not print subscriber identifiers. It requires the target task to have at least one row in `kanban_notify_subs`; otherwise the outbox row is retried with backoff and eventually marked `exhausted`. Each subscriber row is converted to a Hermes target such as `feishu:<chat_id>` or `weixin:<chat_id>:<thread_id>`, then delivered through the Hermes `send_message` capability. This path is for explicit warden notifications, not for duplicating normal native Kanban terminal-event notifications.
+The drainer does not use platform credentials and does not print subscriber identifiers. It first looks for subscribers on the target task, then falls back to root or parent subscribers carried by the source event relationship. If no subscriber is found, the outbox row is retried with backoff and eventually marked `exhausted`. Each subscriber row is converted to a Hermes target such as `feishu:<chat_id>` or `weixin:<chat_id>:<thread_id>`, then delivered through the Hermes `send_message` capability. This path is for explicit warden notifications and tail continuations, not for duplicating normal native Kanban terminal-event notifications.
 
 Safe hairou verification queries:
 

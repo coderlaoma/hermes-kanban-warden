@@ -133,6 +133,13 @@ class NotificationOutboxDrainer:
             if not _table_exists(con, "tasks") or not _task_exists(con, task_id):
                 raise _RetryableDeliveryError("target task missing")
             subscribers = _native_subscribers(con, task_id)
+            if not subscribers:
+                for fallback_task_id in _fallback_subscription_task_ids(_action_payload(payload)):
+                    if fallback_task_id == task_id or not _task_exists(con, fallback_task_id):
+                        continue
+                    subscribers = _native_subscribers(con, fallback_task_id)
+                    if subscribers:
+                        break
         if not subscribers:
             raise _RetryableDeliveryError("no native kanban subscriber for target task")
         message = self._delivery_message(row, payload, board_name=board_name, task_id=task_id)
@@ -162,6 +169,21 @@ class NotificationOutboxDrainer:
                 f"Task: {task_id}",
                 "",
                 "Native Hermes notification omitted the following part:",
+            ]
+            if tail:
+                lines.append(tail)
+            lines.extend(["", f"Outbox: {row['key']}"])
+            return "\n".join(lines).strip()
+
+        if _text(action_payload.get("message_template")) == "completed_summary_tail":
+            tail = _text(action_payload.get("summary_tail"))
+            lines = [
+                "[Kanban Warden] completed summary continued",
+                "",
+                f"Board: {board_name}",
+                f"Task: {task_id}",
+                "",
+                "Native Hermes completion notification omitted the following part:",
             ]
             if tail:
                 lines.append(tail)
@@ -267,6 +289,30 @@ def _action_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(nested, dict):
         return nested
     return payload
+
+
+def _fallback_subscription_task_ids(action_payload: dict[str, Any]) -> list[str]:
+    source_event = action_payload.get("source_event")
+    if not isinstance(source_event, dict):
+        return []
+    relationship = source_event.get("relationship")
+    if not isinstance(relationship, dict):
+        return []
+    candidates: list[str] = []
+    root_task_id = _text(relationship.get("root_task_id"))
+    if root_task_id:
+        candidates.append(root_task_id)
+    parents = relationship.get("parents")
+    if isinstance(parents, list):
+        candidates.extend(_text(parent) for parent in parents if _text(parent))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique.append(candidate)
+    return unique
 
 
 def _title_for_action(kind: str, reason: str) -> str:
